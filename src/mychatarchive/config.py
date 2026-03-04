@@ -23,7 +23,9 @@ from pathlib import Path
 # Defaults
 _DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 _DEFAULT_EMBEDDING_DIM = 384
-_DEFAULT_CHUNK_MAX_CHARS = 2000
+_DEFAULT_CHUNK_MAX_CHARS = 2000   # legacy — superseded by chunk_size
+_DEFAULT_CHUNK_SIZE = 1200        # target chars per chunk (~300 tokens)
+_DEFAULT_CHUNK_OVERLAP = 150      # overlap chars between adjacent chunks (~37 tokens)
 _DEFAULT_SEARCH_LIMIT = 10
 _DEFAULT_STORAGE_BACKEND = "sqlite"
 _DEFAULT_EMBEDDER_BACKEND = "local"
@@ -83,8 +85,27 @@ def get_embedding_dim() -> int:
 
 
 def get_chunk_max_chars() -> int:
+    """Legacy getter — prefer get_chunk_size()."""
     cfg = load_config()
     return cfg.get("embeddings", {}).get("chunk_max_chars", _DEFAULT_CHUNK_MAX_CHARS)
+
+
+def get_chunk_size() -> int:
+    """Target characters per chunk for variable chunking (default 1200 ≈ 300 tokens)."""
+    cfg = load_config()
+    emb = cfg.get("embeddings", {})
+    # chunk_size takes precedence; fall back to legacy chunk_max_chars if explicitly set
+    if "chunk_size" in emb:
+        return int(emb["chunk_size"])
+    if "chunk_max_chars" in emb:
+        return int(emb["chunk_max_chars"])
+    return _DEFAULT_CHUNK_SIZE
+
+
+def get_chunk_overlap() -> int:
+    """Overlap characters between adjacent chunks (default 150 ≈ 37 tokens)."""
+    cfg = load_config()
+    return int(cfg.get("embeddings", {}).get("chunk_overlap", _DEFAULT_CHUNK_OVERLAP))
 
 
 # --- Drop folder ---

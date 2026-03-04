@@ -65,6 +65,11 @@ def embedded_message_ids(con) -> set[str]:
     return _b().embedded_message_ids(con)
 
 
+def clear_chunks(con) -> None:
+    """Delete all chunks and vectors — used by embed --force to allow clean re-embed."""
+    return _b().clear_chunks(con)
+
+
 def insert_chunk(con, chunk_id: str, message_id: Optional[str],
                  thread_id: str, chunk_index: int, text: str,
                  ts_start: str, ts_end: str, embedding: list[float],

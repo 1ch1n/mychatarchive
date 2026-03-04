@@ -178,6 +178,13 @@ def embedded_message_ids(con: sqlite3.Connection) -> set[str]:
 
 # --- Vector operations ---
 
+def clear_chunks(con: sqlite3.Connection) -> None:
+    """Delete all chunks and their vectors. Used by embed --force."""
+    con.execute("DELETE FROM vec_chunks")
+    con.execute("DELETE FROM chunks")
+    con.commit()
+
+
 def insert_chunk(con: sqlite3.Connection, chunk_id: str, message_id: Optional[str],
                  thread_id: str, chunk_index: int, text: str,
                  ts_start: str, ts_end: str, embedding: list[float],
