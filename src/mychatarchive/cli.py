@@ -202,6 +202,7 @@ def _cmd_init():
     from mychatarchive.config import (
         load_config, save_config, get_config_path,
         ensure_drop_folder, _DEFAULT_DROP_FOLDER, _AUTO_SOURCE_DEFAULTS,
+        _DEFAULT_CHUNK_SIZE, _DEFAULT_CHUNK_OVERLAP,
     )
 
     existing = load_config()
@@ -292,6 +293,31 @@ def _cmd_init():
     else:
         print("    OpenRouter coming soon. Using local.")
         cfg["embeddings"]["backend"] = "local"
+
+    # --- Chunking ---
+    print()
+    print("CHUNKING")
+    print("  Long messages are split into overlapping chunks for better semantic search.")
+    print("  1 200 chars ≈ 300 tokens — fits local models and OpenAI's limits.")
+    current_chunk_size = cfg["embeddings"].get("chunk_size", _DEFAULT_CHUNK_SIZE)
+    cs_input = input(f"  Chunk size in chars [{current_chunk_size}]: ").strip()
+    if cs_input:
+        try:
+            cfg["embeddings"]["chunk_size"] = int(cs_input)
+        except ValueError:
+            print(f"    Invalid value, keeping {current_chunk_size}.")
+    else:
+        cfg["embeddings"]["chunk_size"] = current_chunk_size
+
+    current_overlap = cfg["embeddings"].get("chunk_overlap", _DEFAULT_CHUNK_OVERLAP)
+    ov_input = input(f"  Overlap between chunks [{current_overlap}]: ").strip()
+    if ov_input:
+        try:
+            cfg["embeddings"]["chunk_overlap"] = int(ov_input)
+        except ValueError:
+            print(f"    Invalid value, keeping {current_overlap}.")
+    else:
+        cfg["embeddings"]["chunk_overlap"] = current_overlap
 
     # --- Transport ---
     print()
