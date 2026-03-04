@@ -1,7 +1,8 @@
 """Thread summarization pipeline.
 
 Reads threads from the archive, generates LLM summaries, and stores them in
-thread_summaries. Optionally embeds summaries for thread-level semantic search.
+thread_summaries. Longer threads are split into segments — each segment gets
+its own summary row and embedding, giving proportional representation in retrieval.
 
 Pipeline slot: after Sync, before Chunk + Embed.
     mychatarchive sync
@@ -10,6 +11,7 @@ Pipeline slot: after Sync, before Chunk + Embed.
 
 Usage:
     mychatarchive summarize [--model MODEL] [--force] [--limit N]
+    mychatarchive summarize [--messages-per-segment N]
     mychatarchive summarize --base-url https://openrouter.ai/api/v1 --key sk-or-...
 
 The LLM API must be OpenAI-compatible (OpenRouter, Anthropic-compatible, Ollama, etc.).
@@ -39,12 +41,14 @@ except ImportError:
 
 _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 _DEFAULT_MODEL = "anthropic/claude-haiku-4-5"
-_MAX_CONTEXT_CHARS = 6000   # ~1500 tokens; keeps API cost low
-_BATCH_COMMIT = 20          # commit every N summaries
+_DEFAULT_MESSAGES_PER_SEGMENT = 15   # Threads longer than this get multiple summaries
+_SEGMENT_CONTEXT_CHARS = 6000        # ~1500 tokens per segment; keeps API cost low
+_BATCH_COMMIT = 20                   # commit every N segments
 
 _SYSTEM_PROMPT = """\
 You are summarizing an AI conversation for personal archival and retrieval.
-Given a thread title and its messages, return a JSON object with exactly two keys:
+Given a thread title and its messages (or a portion of a long thread), return a JSON object
+with exactly two keys:
   "summary"    – 2-4 sentence description of the main topics, decisions, and outcomes.
                  Be specific: name tools, projects, decisions, and conclusions discussed.
   "key_topics" – array of 3-8 keyword strings (project names, tools, concepts, people, places).
@@ -73,19 +77,48 @@ def _resolve_api_key(cli_key: str | None) -> str:
     return ""
 
 
-def _format_thread(thread_meta: dict, messages: list[dict]) -> str:
-    """Format thread messages into a single string, truncated to _MAX_CONTEXT_CHARS."""
+def _segment_messages(messages: list[dict], per_segment: int) -> list[list[dict]]:
+    """Split messages into segments of up to per_segment messages each."""
+    if not messages:
+        return []
+    return [messages[i:i + per_segment] for i in range(0, len(messages), per_segment)]
+
+
+def _segment_ts(messages: list[dict]) -> tuple[str | None, str | None]:
+    """Return (ts_start, ts_end) for a list of messages."""
+    timestamps = [m.get("ts") for m in messages if m.get("ts")]
+    if not timestamps:
+        return None, None
+    return min(timestamps), max(timestamps)
+
+
+def _segment_chars(messages: list[dict]) -> int:
+    """Total character count of message texts in this segment."""
+    return sum(len(m.get("text") or "") for m in messages)
+
+
+def _format_segment(
+    thread_meta: dict,
+    messages: list[dict],
+    seg_idx: int,
+    total_segments: int,
+) -> str:
+    """Format a segment of messages for the LLM prompt."""
     title = thread_meta.get("title") or "Untitled"
-    parts = [f"Thread: {title}\n---"]
-    chars = len(parts[0])
+    if total_segments > 1:
+        header = f"Thread: {title} (Part {seg_idx + 1} of {total_segments})\n---"
+    else:
+        header = f"Thread: {title}\n---"
+    parts = [header]
+    chars = len(header)
     for msg in messages:
         role = msg.get("role", "?")
         text = (msg.get("text") or "").strip()
         if not text:
             continue
         line = f"\n[{role}]: {text}"
-        if chars + len(line) > _MAX_CONTEXT_CHARS:
-            parts.append(f"\n[... {len(messages)} messages total, truncated ...]")
+        if chars + len(line) > _SEGMENT_CONTEXT_CHARS:
+            parts.append(f"\n[... segment truncated at {_SEGMENT_CONTEXT_CHARS} chars ...]")
             break
         parts.append(line)
         chars += len(line)
@@ -101,7 +134,7 @@ def _call_api(prompt: str, api_key: str, base_url: str, model: str) -> dict:
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        "max_tokens": 400,
+        "max_tokens": 800,
         "temperature": 0.2,
     }
     data = json.dumps(payload).encode()
@@ -138,20 +171,25 @@ def run(
     force: bool = False,
     limit: int | None = None,
     embed_summaries: bool = True,
+    messages_per_segment: int = _DEFAULT_MESSAGES_PER_SEGMENT,
 ) -> dict:
     """Generate LLM summaries for all unsummarized threads.
 
+    Long threads are split into segments of messages_per_segment messages each.
+    Each segment gets its own summary row and embedding in the DB.
+
     Args:
-        db_path:         Path to archive.db
-        model:           LLM model identifier (OpenAI-compatible name)
-        base_url:        API base URL (default: OpenRouter)
-        api_key:         API key (falls back to env vars if empty)
-        force:           Re-summarize already-summarized threads
-        limit:           Max threads to process in this run
-        embed_summaries: Also embed summaries for thread-level semantic search
+        db_path:              Path to archive.db
+        model:                LLM model identifier (OpenAI-compatible name)
+        base_url:             API base URL (default: OpenRouter)
+        api_key:              API key (falls back to env vars if empty)
+        force:                Re-summarize already-summarized threads (deletes old segments)
+        limit:                Max threads to process in this run
+        embed_summaries:      Also embed summaries for thread-level semantic search
+        messages_per_segment: Messages per summary segment (default: 15)
 
     Returns:
-        {"processed": N, "skipped": N, "errors": N, "total_threads": N}
+        {"processed": N, "skipped": N, "errors": N, "total_threads": N, "segments": N}
     """
     from mychatarchive import db
 
@@ -189,9 +227,13 @@ def run(
     if not threads:
         print("  [summarize] Nothing to do.", file=sys.stderr)
         con.close()
-        return {"processed": 0, "skipped": total - 0, "errors": 0, "total_threads": total}
+        return {"processed": 0, "skipped": total, "errors": 0, "total_threads": total, "segments": 0}
 
-    print(f"  [summarize] Processing {len(threads):,} threads with {model}", file=sys.stderr)
+    print(
+        f"  [summarize] Processing {len(threads):,} threads with {model} "
+        f"(up to {messages_per_segment} msgs/segment)",
+        file=sys.stderr,
+    )
 
     # Optionally embed summaries
     embedder = None
@@ -203,44 +245,60 @@ def run(
             print("  [summarize] Warning: embeddings not available, skipping summary embeddings.",
                   file=sys.stderr)
 
-    processed = errors = 0
+    processed = errors = total_segments = 0
     iterator = tqdm(threads, desc="Summarizing", unit="thread") if _HAS_TQDM else threads
 
-    for i, thread_meta in enumerate(iterator):
+    for thread_meta in iterator:
         thread_id = thread_meta["canonical_thread_id"]
         try:
             messages = db.get_thread_messages(con, thread_id)
             if not messages:
                 continue
 
-            prompt = _format_thread(thread_meta, messages)
-            raw = _call_api(prompt, api_key, base_url, model)
-            summary, key_topics = _parse_response(raw)
+            if force:
+                db.delete_thread_summaries(con, thread_id)
 
-            if not summary:
-                raise ValueError("Empty summary returned")
+            segments = _segment_messages(messages, messages_per_segment)
+            n_segments = len(segments)
 
-            db.insert_thread_summary(
-                con,
-                canonical_thread_id=thread_id,
-                title=thread_meta.get("title"),
-                platform=thread_meta.get("platform"),
-                message_count=thread_meta.get("message_count", len(messages)),
-                ts_start=thread_meta.get("ts_start"),
-                ts_end=thread_meta.get("ts_end"),
-                summary=summary,
-                key_topics=key_topics,
-                summary_model=model,
-                now=now_str,
-            )
+            for seg_idx, seg_messages in enumerate(segments):
+                summary_id = f"{thread_id}::{seg_idx:04d}"
+                seg_ts_start, seg_ts_end = _segment_ts(seg_messages)
+                seg_chars = _segment_chars(seg_messages)
 
-            if embedder:
-                try:
-                    emb = embedder(summary)
-                    db.insert_thread_summary_embedding(con, thread_id, emb)
-                except Exception as e:
-                    print(f"  [summarize] Embedding failed for {thread_id[:8]}: {e}",
-                          file=sys.stderr)
+                prompt = _format_segment(thread_meta, seg_messages, seg_idx, n_segments)
+                raw = _call_api(prompt, api_key, base_url, model)
+                summary, key_topics = _parse_response(raw)
+
+                if not summary:
+                    raise ValueError("Empty summary returned")
+
+                db.insert_thread_summary(
+                    con,
+                    summary_id=summary_id,
+                    canonical_thread_id=thread_id,
+                    segment_index=seg_idx,
+                    title=thread_meta.get("title"),
+                    platform=thread_meta.get("platform"),
+                    message_count=len(seg_messages),
+                    segment_chars=seg_chars,
+                    ts_start=seg_ts_start,
+                    ts_end=seg_ts_end,
+                    summary=summary,
+                    key_topics=key_topics,
+                    summary_model=model,
+                    now=now_str,
+                )
+
+                if embedder:
+                    try:
+                        emb = embedder(summary)
+                        db.insert_thread_summary_embedding(con, summary_id, emb)
+                    except Exception as e:
+                        print(f"  [summarize] Embedding failed for {summary_id}: {e}",
+                              file=sys.stderr)
+
+                total_segments += 1
 
             processed += 1
 
@@ -260,7 +318,14 @@ def run(
 
     skipped = total - len(threads)
     print(
-        f"  [summarize] Done: {processed:,} processed, {skipped:,} skipped, {errors} errors",
+        f"  [summarize] Done: {processed:,} threads ({total_segments:,} segments), "
+        f"{skipped:,} skipped, {errors} errors",
         file=sys.stderr,
     )
-    return {"processed": processed, "skipped": skipped, "errors": errors, "total_threads": total}
+    return {
+        "processed": processed,
+        "skipped": skipped,
+        "errors": errors,
+        "total_threads": total,
+        "segments": total_segments,
+    }

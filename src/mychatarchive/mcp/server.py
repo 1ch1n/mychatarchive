@@ -8,6 +8,7 @@ Use sys.stderr or logging for any debug output.
 """
 
 import datetime
+import logging
 import hashlib
 import json
 import sys
@@ -17,6 +18,9 @@ from mcp.server.fastmcp import FastMCP
 
 from mychatarchive import db
 from mychatarchive.config import get_db_path
+
+# Quiet MCP SDK INFO logs (they go to stderr and show as [error] in Cursor's MCP panel)
+logging.getLogger("mcp").setLevel(logging.WARNING)
 
 mcp = FastMCP("mychatarchive")
 
@@ -258,19 +262,45 @@ def get_context(
             })
             thread_ids.add(row[1])
 
-    # Include thread-level summaries for matched threads (richer context)
+    # Include thread-level summaries for matched threads (richer context).
+    # Use get_thread_summaries (all segments) so multi-segment threads show their full content.
+    # 10-col: summary_id[0], canonical_thread_id[1], segment_index[2], title[3],
+    #         platform[4], message_count[5], ts_start[6], ts_end[7], summary[8], key_topics[9]
     thread_summaries_out = []
     for tid in list(thread_ids)[:5]:
-        summary_row = db.get_thread_summary(con, tid)
-        if summary_row:
-            thread_summaries_out.append({
-                "thread_id": tid,
-                "title": summary_row[1],
-                "summary": summary_row[6],
-                "key_topics": json.loads(summary_row[7]) if summary_row[7] else [],
-                "ts_start": summary_row[4],
-                "ts_end": summary_row[5],
-            })
+        segs = db.get_thread_summaries(con, tid)
+        if not segs:
+            continue
+        # Merge all segments into a single thread-level summary
+        title = segs[0][3] or ""
+        ts_start = segs[0][6] or ""
+        ts_end = segs[-1][7] or ""
+        # For multi-segment threads, prefix each segment so the model can orient itself
+        if len(segs) == 1:
+            combined_summary = segs[0][8] or ""
+        else:
+            parts = []
+            for seg in segs:
+                seg_text = seg[8] or ""
+                parts.append(f"Part {seg[2] + 1}: {seg_text}")
+            combined_summary = "\n\n".join(parts)
+        # Deduplicate key_topics across all segments, preserving insertion order
+        seen_topics: set = set()
+        all_topics = []
+        for seg in segs:
+            for t in (json.loads(seg[9]) if seg[9] else []):
+                if t not in seen_topics:
+                    seen_topics.add(t)
+                    all_topics.append(t)
+        thread_summaries_out.append({
+            "thread_id": tid,
+            "title": title,
+            "summary": combined_summary,
+            "key_topics": all_topics,
+            "ts_start": ts_start,
+            "ts_end": ts_end,
+            "segment_count": len(segs),
+        })
 
     related_thoughts = []
     for thought_id, distance in thought_results:
@@ -351,22 +381,24 @@ def get_profile(
     group_thread_ids = _resolve_group_thread_ids(con, group)
 
     # 1. Thread summaries from the recent window (thread-level context)
+    # 10-col layout: summary_id[0], canonical_thread_id[1], segment_index[2], title[3],
+    #                platform[4], message_count[5], ts_start[6], ts_end[7], summary[8], key_topics[9]
     recent_summaries_raw = db.list_thread_summaries(
         con, limit=20, platform=platform, since_iso=cutoff
     )
     thread_summaries = []
     for row in recent_summaries_raw:
-        # Filter by group if specified
-        if group_thread_ids is not None and row[0] not in group_thread_ids:
+        # Filter by group if specified (canonical_thread_id is col 1)
+        if group_thread_ids is not None and row[1] not in group_thread_ids:
             continue
         thread_summaries.append({
-            "thread_id": row[0],
-            "title": row[1],
-            "platform": row[2],
-            "ts_start": row[3],
-            "ts_end": row[4],
-            "summary": row[5],
-            "key_topics": json.loads(row[6]) if row[6] else [],
+            "thread_id": row[1],
+            "title": row[3],
+            "platform": row[4],
+            "ts_start": row[6],
+            "ts_end": row[7],
+            "summary": row[8],
+            "key_topics": json.loads(row[9]) if row[9] else [],
         })
 
     # 2. Recent message chunks (always include — fallback if no summaries)

@@ -16,7 +16,8 @@ Example config.json:
   "summarize": {
     "api_key": "sk-or-...",
     "model": "anthropic/claude-haiku-4-5",
-    "base_url": "https://openrouter.ai/api/v1"
+    "base_url": "https://openrouter.ai/api/v1",
+    "messages_per_segment": 15
   }
 }
 """
