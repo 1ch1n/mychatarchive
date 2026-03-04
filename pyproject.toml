@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mychatarchive"
+version = "0.1.0"
+description = "Local-first AI memory archive. Import chat history, generate semantic embeddings, and search via MCP."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Channing Chasko", email = "channing@mychatarchive.com"},
+]
+keywords = ["ai", "chat", "archive", "mcp", "embeddings", "semantic-search", "llm", "memory"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "sentence-transformers>=3.0.0",
+    "torch>=2.0.0",
+    "sqlite-vec>=0.1.1",
+    "mcp[cli]>=1.0.0",
+    "tqdm>=4.66.0",
+    "ijson>=3.2.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+mychatarchive = "mychatarchive.cli:main"
+
+[project.urls]
+Homepage = "https://mychatarchive.com"
+Repository = "https://github.com/1ch1n/mychatarchive"
+Issues = "https://github.com/1ch1n/mychatarchive/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

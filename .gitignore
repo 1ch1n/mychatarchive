@@ -1,55 +1,30 @@
-# Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
+dist/
+build/
 *.egg
-.pytest_cache/
+.eggs/
 
-# Virtual environments
+.venv/
 venv/
-ENV/
 env/
-.venv
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# SQLite databases (except sample)
 *.sqlite
 *.sqlite3
 *.db
-!examples/sample_archive.sqlite
 
-# Example data - exclude large files, keep small examples
-examples/*.json
-!examples/example_chatgpt.json
-!examples/example_anthropic.json
-!examples/example_grok.json
-
-# Logs
-*.log
-
-# Environment
 .env
 .env.local
+
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+*.log
+.DS_Store
+Thumbs.db
+
+# Model cache (large)
+models/
