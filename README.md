@@ -4,57 +4,72 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-**Your AI conversations, searchable by meaning.**
+**Your AI conversation history, locally searchable by meaning.**
 
-MyChatArchive turns your exported AI chat history into a local semantic memory that any AI tool can search. Import conversations from ChatGPT, Claude, Grok, Claude Code, and Cursor. Generate vector embeddings locally. Connect via MCP to Claude Desktop, Cursor, or any compatible client.
+MyChatArchive imports your chat exports from ChatGPT, Claude, Grok, Claude Code, and Cursor, generates vector embeddings locally with sentence-transformers, and exposes everything via an MCP server that any AI tool can query.
 
-No cloud. No API keys. Everything runs on your machine by default - with optionality for cloud backends when you're ready.
+**Open core:** The local pipeline (import, embed, summarize, search, MCP server) is free and MIT-licensed. Cloud sync and hosted MCP are on the roadmap at [mychatarchive.com](https://mychatarchive.com).
+
+---
+
+## Why MyChatArchive
+
+**Import your actual history.** AnythingLLM, Mem0, and Supermemory all let you add new memories going forward. None of them let you bulk-import your existing ChatGPT, Claude, or Grok exports. That archive is already yours -- this tool makes it searchable.
+
+- **Lossless.** Full message transcripts, not extracted summaries. You can always search the original.
+- **Local-first.** Single SQLite file. Embeddings run on your machine. Core needs no API keys.
+- **Developer-native.** Auto-discovers Claude Code sessions and Cursor conversations from your local machine on day one.
+- **MCP server.** Claude Desktop, Cursor, Claude Code, and any MCP client can search your archive.
 
 ---
 
 ## Quick Start
 
 ```bash
+git clone https://github.com/1ch1n/mychatarchive.git
+cd mychatarchive
 pip install .
 
 # 1. Set up (creates drop folder, configures auto-discovery)
 mychatarchive init
 
-# 2. Drop your chat exports into the drop folder
-#    Default: ~/.mychatarchive/imports/
-#    Supports: ChatGPT, Claude, Grok JSON exports - auto-detected
-
-# 3. Sync everything with one command
+# 2. Import everything in one command
+#    Auto-discovers Claude Code + Cursor, scans your drop folder
 mychatarchive sync
 
-# This automatically:
-#  - Scans Claude Code sessions (~/.claude/)
-#  - Scans Cursor conversations
-#  - Imports any files in your drop folder
-#  - Pulls from any named sources you've configured
-#  - Deduplicates everything
+# 3. (Optional) Generate thread summaries for richer context retrieval
+#    Needs an API key: set OPENROUTER_API_KEY or ANTHROPIC_API_KEY
+mychatarchive summarize
 
-# 4. Generate embeddings (one-time, runs locally)
+# 4. Generate local embeddings
 mychatarchive embed
 
 # 5. Start the MCP server
 mychatarchive serve
 ```
 
-Then connect from Claude Desktop, Cursor, or any MCP client. That's it.
+Then connect from Claude Desktop or Cursor: run `mychatarchive mcp-config` and add the output to your client config. That's it.
+
+---
 
 ## What You Get
 
-Once running, any MCP-connected AI tool can:
+Once the MCP server is running, any connected AI tool can call:
 
 | Tool | What it does |
 |------|-------------|
-| `search_brain` | Semantic search - find messages by *meaning*, not just keywords |
-| `search_recent` | Get recent conversations and thoughts by time range |
-| `get_context` | Given a topic, get a full context bundle (related threads, decisions, thoughts) |
-| `capture_thought` | Save a new thought with auto-embedding for future retrieval |
+| `search_brain` | Semantic search by meaning across all conversations |
+| `search_recent` | Recent conversations and captured thoughts by time range |
+| `get_context` | Full context bundle for a topic: related threads, LLM summaries, thoughts |
+| `capture_thought` | Save a thought or note with auto-embedding for future retrieval |
+| `get_profile` | Snapshot of your recent focus areas, thread summaries, and thoughts |
+| `get_current_datetime` | Current UTC datetime, injected into every tool response |
+
+All search tools support filtering by platform, time range (`hours_back`, `since`), and thread group. Sort by relevance or recency.
 
 **Example:** Ask Claude "What did I decide about the database architecture last month?" and it searches your actual conversation history semantically.
+
+---
 
 ## Installation
 
@@ -75,132 +90,155 @@ pip install -e ".[dev]"
 ### Requirements
 
 - Python 3.10+
-- ~500MB disk for the embedding model (downloaded once)
-- No API keys needed
+- ~500MB disk for the embedding model (downloaded once, runs locally)
+- No API keys needed for: sync, embed, search, serve
+- `summarize` uses an LLM API for thread summaries (optional but recommended for `get_profile`)
 
-## Usage
+---
 
-### Interactive setup
+## The Pipeline
 
-```bash
-mychatarchive init
-```
-
-Walks you through configuring:
-- **Drop folder** - where you place raw export files (default: `~/.mychatarchive/imports/`)
-- **Auto-discovery** - toggle Claude Code and Cursor auto-import on/off
-- **Storage, embeddings, transport** - defaults to local/zero-config if you just press Enter
-
-### Sync (the one command you need)
+**Full workflow:**
 
 ```bash
 mychatarchive sync           # import from all sources
-mychatarchive sync --embed   # import + generate embeddings in one shot
+mychatarchive summarize      # LLM thread summaries (optional, needs API key)
+mychatarchive embed          # generate vector embeddings locally
+mychatarchive serve          # start MCP server
 ```
 
-This single command:
-1. **Auto-discovers** Claude Code sessions from `~/.claude/projects/`
-2. **Auto-discovers** Cursor conversations from local databases
-3. **Scans the drop folder** for any JSON/JSONL files (auto-detects format)
-4. **Pulls from named sources** (NAS shares, custom folders, etc.)
-5. **Deduplicates** everything against what's already in the archive
-
-Run it daily, weekly, whenever - dedup means it's always safe to re-run.
-
-### Drop folder
-
-The universal import method. Works on any machine, with any platform's exports.
-
-1. Run `mychatarchive init` (creates the folder)
-2. Drop export files into `~/.mychatarchive/imports/` (or wherever you configured it)
-3. Run `mychatarchive sync`
-
-Supports ChatGPT `conversations.json`, Claude exports, Grok exports - format is auto-detected. Subdirectories are scanned recursively.
-
-### Manual imports
-
-For one-off files or when you don't want to use the drop folder:
+**Shortcut:**
 
 ```bash
-# Single file (auto-detects format)
-mychatarchive import conversations.json
-
-# Entire folder (recursive)
-mychatarchive import ./exports/
-
-# Force a specific format
-mychatarchive import weird_file.json --format chatgpt
+mychatarchive sync --embed   # sync + embed in one shot
+mychatarchive serve
 ```
 
-### Named sources
+The pipeline is incremental. Re-run `sync` any time -- SHA1 dedup means it's always safe. New messages get embedded on the next `embed` run without `--force`.
 
-Set up persistent locations you pull from regularly - a NAS share, a downloads folder, etc.
+---
+
+## Sync
 
 ```bash
-# Add sources
-mychatarchive sources add nas "\\\\server.local\\share\\exports"
-mychatarchive sources add exports "~/Downloads/ai-exports" --format chatgpt
-mychatarchive sources add work "D:\\work-chats" --account work
-
-# See everything (auto-sources + drop folder + named sources)
-mychatarchive sources list
-
-# Import from a specific source
-mychatarchive import --from nas
-
-# Manage sources
-mychatarchive sources rename nas home-nas
-mychatarchive sources remove old-source
+mychatarchive sync           # import from all sources
+mychatarchive sync --embed   # sync + generate embeddings in one shot
 ```
 
-Named sources are included automatically when you run `mychatarchive sync`.
+`sync` imports in three layers:
 
-### Generate embeddings
+1. **Auto-discovery** -- Claude Code sessions (`~/.claude/projects/`) and Cursor conversations from local databases. Enabled by default, toggleable in `init`.
+2. **Drop folder** -- anything in `~/.mychatarchive/imports/`. Drop your ChatGPT, Claude, or Grok export JSON here; format is auto-detected. Subdirectories scanned recursively.
+3. **Named sources** -- custom paths or NAS shares you've configured with `mychatarchive sources add`.
+
+All three deduplicate into the same archive via SHA1 hashing.
+
+> **Note:** Auto-discovery covers Claude Code (the terminal agent) and Cursor. Claude web, mobile, and desktop app conversations require a manual export from Anthropic's settings -- drop the file in your imports folder and run `sync`.
+
+---
+
+## Summarize
+
+Generate LLM thread summaries for richer context retrieval and the `get_profile` MCP tool.
 
 ```bash
-mychatarchive embed              # embed new messages only
-mychatarchive embed --force      # re-embed everything
+mychatarchive summarize                              # default model via OpenRouter
+mychatarchive summarize --model gpt-4o-mini          # specify model
+mychatarchive summarize --key sk-...                 # pass API key inline
+mychatarchive summarize --limit 50                   # process first 50 threads (for testing)
 ```
 
-Uses `all-MiniLM-L6-v2` (384 dimensions) locally via sentence-transformers. No data leaves your machine.
+Summaries are stored in SQLite, embedded into their own vector index, and surfaced by `get_context` and `get_profile`. Without summaries, `get_profile` falls back to recent message chunks.
 
-### Search from the command line
+**API key:** Set `OPENROUTER_API_KEY` (default) or `ANTHROPIC_API_KEY`, or pass `--key` inline.
+
+---
+
+## Thread Groups
+
+Organize threads into named groups for scoped search and context retrieval. Useful when your archive mixes personal conversations, coding work, and project threads -- you can scope search to exactly what's relevant.
+
+```bash
+# Create groups
+mychatarchive groups create jarvis --description "Daily personal chats"
+mychatarchive groups create coding --description "Dev work and technical threads"
+
+# Browse threads to find IDs
+mychatarchive groups show jarvis
+
+# Add threads
+mychatarchive groups add jarvis <thread_id> <thread_id>
+
+# Scope search to a group
+mychatarchive search "what did I decide" --group jarvis
+
+# In MCP tools: search_brain(query="...", group="jarvis")
+```
+
+The `group` filter works on `search_brain`, `get_context`, `get_profile`, and the `search` CLI.
+
+---
+
+## Search from the CLI
 
 ```bash
 mychatarchive search "database architecture decisions"
-mychatarchive search "what did I build last week" --limit 20
 mychatarchive search "python error handling" --mode keyword
+mychatarchive search "auth flow" --platform claude_code --group coding
+mychatarchive search "what did I build" --hours 168 --sort time
+mychatarchive search "api design" --since 2026-01-01
 ```
 
-### Export your archive
+Default mode is semantic (vector search). Supports: `--mode keyword` for FTS, `--platform` for source filter, `--hours` / `--since` for time filter, `--sort time` for newest-first, `--group` for group filter.
 
-Portable exports in three formats - take your data anywhere.
+---
+
+## Export
 
 ```bash
-# JSON (full structured export, default)
-mychatarchive export my_archive.json
-
-# CSV (spreadsheet-friendly)
-mychatarchive export my_archive.csv
-
-# SQLite copy (full database clone with embeddings)
-mychatarchive export my_archive.db
-
-# Filter by platform
-mychatarchive export chatgpt_only.json --platform chatgpt
-
-# Include captured thoughts
+mychatarchive export archive.json           # full structured export
+mychatarchive export archive.csv            # spreadsheet-friendly
+mychatarchive export archive.db             # full SQLite copy with embeddings
+mychatarchive export chatgpt.json --platform chatgpt
 mychatarchive export everything.json --include-thoughts
 ```
 
-### Start the MCP server
+---
+
+## Connecting to AI Tools
+
+### Claude Desktop
 
 ```bash
-mychatarchive serve                              # stdio (default, for local clients)
-mychatarchive serve --transport sse --port 8420   # HTTP/SSE (for remote/mobile access)
+mychatarchive mcp-config --client claude-desktop
 ```
 
-### Check archive stats
+Add the output to your config file:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+### Cursor
+
+```bash
+mychatarchive mcp-config --client cursor
+```
+
+Add the output to your Cursor MCP settings.
+
+### Remote access via SSE
+
+For mobile or multi-device access, run the server on a NAS or always-on machine:
+
+```bash
+mychatarchive serve --transport sse --port 8420
+```
+
+Connect via Tailscale or WireGuard from any device. Works with Claude mobile and any MCP client that supports remote servers.
+
+---
+
+## Check Archive Stats
 
 ```bash
 mychatarchive info
@@ -211,86 +249,36 @@ MyChatArchive - ~/.mychatarchive/archive.db
 ----------------------------------------
   Messages:    47,832
   Threads:     1,204
-  Embedded:    47,832
+  Summaries:   1,204
+  Embedded:    51,388 chunks
   Thoughts:    12
+  Groups:      3
   Platforms:
     chatgpt: 38,541
     anthropic: 8,291
     grok: 1,000
 ```
 
-## Connecting to AI Tools
-
-### Claude Desktop
-
-Run `mychatarchive mcp-config --client claude-desktop` and add the output to your config file:
-
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "mychatarchive": {
-      "command": "mychatarchive",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-### Cursor
-
-Run `mychatarchive mcp-config --client cursor` and add to your Cursor MCP settings.
-
-### Custom database path
-
-```json
-{
-  "mcpServers": {
-    "mychatarchive": {
-      "command": "mychatarchive",
-      "args": ["--db", "/path/to/archive.db", "serve"]
-    }
-  }
-}
-```
-
-### Remote access (SSE)
-
-For mobile or multi-device access, run the SSE server on a NAS or always-on machine:
-
-```bash
-mychatarchive serve --transport sse --port 8420
-```
-
-Then connect via Tailscale/WireGuard from any device. Works with Claude mobile and any MCP client that supports remote servers.
+---
 
 ## How It Works
 
 ```
-┌─────────────────────┐     ┌──────────────────────┐     ┌─────────────────────┐
-│ Chat Exports        │     │ MyChatArchive        │     │ MCP Clients         │
-│                     │     │                      │     │                     │
-│ ChatGPT  .json ─────┼────►│ Parse + Deduplicate  │     │ Claude Desktop      │
-│ Claude   .json ─────┼────►│ Embed (local model)  │◄────┤ Cursor              │
-│ Grok     .json ─────┼────►│ Store (SQLite + vec) │     │ Claude Code         │
-│ Claude Code   ──────┼────►│ Export (JSON/CSV/DB) │     │ Claude Mobile       │
-│ Cursor IDE    ──────┼────►│ Serve (MCP)          │     │ Any MCP client      │
-└─────────────────────┘     └──────────────────────┘     └─────────────────────┘
+Auto-discovery (Claude Code, Cursor)  --+
+Drop folder (ChatGPT, Claude, Grok)   --+--> Parse + SHA1 dedup --> SQLite (FTS5)
+Named sources (NAS, custom paths)     --+              |
+                                                       v
+                                           sentence-transformers (local)
+                                                       |
+                                                       v
+                                           sqlite-vec (cosine KNN)
+                                                       |
+                                                       v
+                                           MCP server (stdio / SSE)
+                                                       |
+                                          Claude Desktop / Cursor /
+                                          Claude Code / Claude Mobile
 ```
-
-### Pluggable backends
-
-MyChatArchive ships with sensible local-first defaults but lets you swap backends when you need to scale or go remote:
-
-| Component | Default | Available | Planned |
-|-----------|---------|-----------|---------|
-| **Storage** | SQLite + FTS5 + sqlite-vec | | PostgreSQL, Supabase |
-| **Embeddings** | sentence-transformers (local) | | OpenAI, OpenRouter |
-| **MCP Transport** | stdio (local pipe) | SSE/HTTP (remote) | |
-
-Configure via `mychatarchive init` or edit `~/.mychatarchive/config.json` directly.
 
 ### Stack
 
@@ -298,17 +286,19 @@ Configure via `mychatarchive init` or edit `~/.mychatarchive/config.json` direct
 |-----------|-----------|
 | **Storage** | SQLite + FTS5 (full-text) + sqlite-vec (vectors) |
 | **Embeddings** | sentence-transformers `all-MiniLM-L6-v2` (384 dim, local) |
+| **Summarization** | Any OpenAI-compatible API (OpenRouter default, Anthropic fallback) |
 | **Interface** | MCP server (stdio + SSE transport) |
 | **Deduplication** | SHA1-based stable message IDs |
 | **CLI** | Python argparse + rich |
-| **Export** | JSON, CSV, SQLite copy |
 
 ### Data stays local
 
-- Embeddings generated by a local model - no OpenAI, no cloud
-- Database is a single SQLite file on your disk
-- MCP server runs locally over stdio
-- No network calls, no telemetry, no tracking
+- Embeddings run locally. No OpenAI, no cloud.
+- Database is a single SQLite file at `~/.mychatarchive/archive.db`.
+- MCP server runs over stdio by default (local pipe, no network).
+- `summarize` is the only step that makes outbound API calls. It's optional.
+
+---
 
 ## CLI Reference
 
@@ -323,8 +313,14 @@ Configure via `mychatarchive init` or edit `~/.mychatarchive/config.json` direct
 | `mychatarchive sources list` | Show all sources (auto + drop + named) |
 | `mychatarchive sources remove <name>` | Remove a source |
 | `mychatarchive sources rename <old> <new>` | Rename a source |
-| `mychatarchive export <output>` | Export to JSON, CSV, or SQLite copy |
+| `mychatarchive summarize` | Generate LLM thread summaries (needs API key) |
+| `mychatarchive groups list` | List all thread groups |
+| `mychatarchive groups create <name>` | Create a thread group |
+| `mychatarchive groups add <group> <ids...>` | Add threads to a group |
+| `mychatarchive groups show <name>` | Show threads in a group |
+| `mychatarchive groups delete <name>` | Delete a group (threads are not deleted) |
 | `mychatarchive embed` | Generate vector embeddings |
+| `mychatarchive export <output>` | Export to JSON, CSV, or SQLite copy |
 | `mychatarchive serve` | Start MCP server |
 | `mychatarchive search <query>` | Search from the terminal |
 | `mychatarchive info` | Show archive statistics |
@@ -332,36 +328,34 @@ Configure via `mychatarchive init` or edit `~/.mychatarchive/config.json` direct
 
 All commands accept `--db /path/to/archive.db` to override the default database location.
 
+---
+
 ## Project Structure
 
 ```
 mychatarchive/
-├── src/mychatarchive/
-│   ├── cli.py              # Unified CLI
-│   ├── config.py           # Paths, constants, config management
-│   ├── db.py               # Data access layer (delegates to backends)
-│   ├── embeddings.py       # Embedding pipeline orchestration
-│   ├── ingest.py           # Import engine with dedup
-│   ├── parsers/
-│   │   ├── __init__.py     # Auto-detection + registry
-│   │   ├── chatgpt.py      # ChatGPT conversations.json
-│   │   ├── anthropic.py    # Claude export format
-│   │   ├── grok.py         # Grok/X.AI export format
-│   │   ├── claude_code.py  # Claude Code JSONL sessions
-│   │   └── cursor.py       # Cursor IDE SQLite databases
-│   ├── backends/
-│   │   ├── __init__.py     # Backend registry + factory
-│   │   ├── storage/        # StorageBackend protocol + sqlite impl
-│   │   ├── embeddings/     # EmbedderBackend protocol + local impl
-│   │   └── transport/      # Transport type constants
-│   └── mcp/
-│       └── server.py       # MCP server (search_brain, capture_thought, etc.)
-├── examples/               # Sample exports + MCP configs
-├── tests/                  # Parser, DB, and backend tests
-├── pyproject.toml          # Package config
-├── ROADMAP.md              # Development roadmap
-└── README.md
++-- src/mychatarchive/
+|   +-- cli.py              # Unified CLI
+|   +-- config.py           # Paths, constants, config management
+|   +-- db.py               # Data access layer (delegates to backends)
+|   +-- embeddings.py       # Local embedding pipeline
+|   +-- ingest.py           # Import engine with SHA1 dedup
+|   +-- summarizer.py       # LLM thread summarization pipeline
+|   +-- parsers/
+|   |   +-- chatgpt.py      # ChatGPT conversations.json
+|   |   +-- anthropic.py    # Claude export format
+|   |   +-- grok.py         # Grok/X.AI export format
+|   |   +-- claude_code.py  # Claude Code JSONL sessions
+|   |   +-- cursor.py       # Cursor IDE SQLite databases
+|   +-- backends/           # Pluggable storage, embeddings, transport
+|   +-- mcp/
+|       +-- server.py       # MCP server (6 tools)
++-- tests/
++-- pyproject.toml
++-- ROADMAP.md
 ```
+
+---
 
 ## Adding a New Parser
 
@@ -381,50 +375,61 @@ def parse(input_path: str) -> Iterator[dict]:
     }
 ```
 
-Register it in `src/mychatarchive/parsers/__init__.py`:
+Register it in `src/mychatarchive/parsers/__init__.py`.
 
-```python
-from mychatarchive.parsers import yourplatform
-
-PARSERS = {
-    ...
-    "yourplatform": yourplatform,
-}
-```
+---
 
 ## Default Data Location
 
 ```
 ~/.mychatarchive/
-├── archive.db          # SQLite database (messages + vectors + thoughts)
-├── config.json         # Backend + source configuration (optional)
-└── imports/            # Drop folder - place export files here
++-- archive.db          # SQLite database (messages + vectors + thoughts)
++-- config.json         # Backend + source configuration
++-- imports/            # Drop folder for export files
 ```
 
 Override with `--db /path/to/your.db` on any command, or set a custom drop folder path in `init`.
 
+---
+
 ## Roadmap
 
-- [x] Multi--platform import (ChatGPT, Claude, Grok, Claude Code, Cursor)
-- [x] Local vector embeddings (sentence-transformers)
-- [x] MCP server with semantic search + thought capture
+- [x] Multi-platform import (ChatGPT, Claude, Grok, Claude Code, Cursor)
+- [x] Local vector embeddings (sentence-transformers, no API)
+- [x] MCP server: search_brain, search_recent, get_context, capture_thought, get_profile, get_current_datetime
+- [x] Thread summaries via any OpenAI-compatible API (`mychatarchive summarize`)
+- [x] Thread groups with group-scoped search (`mychatarchive groups`)
+- [x] Platform, time, and group filters on search and all MCP tools
 - [x] Pluggable backend architecture (storage, embeddings, transport)
-- [x] Export command (JSON, CSV, SQLite copy)
-- [x] SSE transport for remote access
-- [x] Named import sources with batch/folder import
-- [x] One-command sync with auto-discovery + drop folder
+- [x] Export (JSON, CSV, SQLite copy)
+- [x] SSE transport for remote MCP access
+- [x] One-command sync with auto-discovery + drop folder + named sources
 - [ ] Additional parsers (Gemini, Perplexity, Copilot)
-- [ ] Thread-level chunking for better context retrieval
-- [ ] Analysis engine (life threads, decision tracking, pattern detection)
-- [ ] Auto-sync (programmatic imports without manual exports)
-- [ ] Web dashboard at [mychatarchive.com](https://mychatarchive.com)
+- [ ] Grouping UI (browse threads and assign to groups without knowing thread IDs)
+- [ ] Analysis engine (deep prompts against your full archive)
+- [ ] Auto-sync (no manual exports needed)
+- [ ] PyPI publish
+- [ ] Web dashboard + hosted option at [mychatarchive.com](https://mychatarchive.com)
 - [ ] Docker image for one-command self-hosting
 
 See [ROADMAP.md](ROADMAP.md) for the full phased plan.
 
+---
+
+## Open Core
+
+| | Tier |
+|-|------|
+| Import, embed, summarize, groups, MCP server (stdio) | Free / local (MIT) |
+| SSE transport with auth, cloud sync, hosted MCP, teams | Planned at [mychatarchive.com](https://mychatarchive.com) |
+
+The principle: anything that runs on your machine is free. Anything that requires infrastructure is paid.
+
+---
+
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT -- see [LICENSE](LICENSE).
 
 ---
 

@@ -164,6 +164,13 @@ def main():
         action="store_true",
         help="Skip embedding the summaries (faster, but disables thread-level semantic search)",
     )
+    summarize_p.add_argument(
+        "--messages-per-segment",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Messages per summary segment. Threads with more messages get multiple summaries. Default: 15.",
+    )
     _add_db_arg(summarize_p)
 
     # --- groups ---
@@ -737,15 +744,23 @@ def _cmd_summarize(args, db_path: Path):
         sys.exit(1)
 
     from mychatarchive.config import load_config
-    from mychatarchive.summarizer import run as summarize_run, _DEFAULT_MODEL, _DEFAULT_BASE_URL
+    from mychatarchive.summarizer import (
+        run as summarize_run, _DEFAULT_MODEL, _DEFAULT_BASE_URL, _DEFAULT_MESSAGES_PER_SEGMENT,
+    )
 
     summarize_cfg = load_config().get("summarize", {})
     model = args.model or summarize_cfg.get("model") or _DEFAULT_MODEL
     base_url = args.base_url or summarize_cfg.get("base_url") or _DEFAULT_BASE_URL
+    messages_per_segment = (
+        args.messages_per_segment
+        or summarize_cfg.get("messages_per_segment")
+        or _DEFAULT_MESSAGES_PER_SEGMENT
+    )
 
     print(f"Generating thread summaries...", file=sys.stderr)
     print(f"  Model:    {model}", file=sys.stderr)
     print(f"  Base URL: {base_url}", file=sys.stderr)
+    print(f"  Segment:  {messages_per_segment} messages/segment", file=sys.stderr)
     if args.limit:
         print(f"  Limit:    {args.limit} threads", file=sys.stderr)
 
@@ -758,6 +773,7 @@ def _cmd_summarize(args, db_path: Path):
             force=args.force,
             limit=args.limit,
             embed_summaries=not args.no_embed,
+            messages_per_segment=messages_per_segment,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -765,7 +781,7 @@ def _cmd_summarize(args, db_path: Path):
 
     print()
     print(f"Summarization complete:")
-    print(f"  Processed: {stats['processed']:,}")
+    print(f"  Processed: {stats['processed']:,} threads ({stats.get('segments', 0):,} segments)")
     print(f"  Skipped:   {stats['skipped']:,} (already summarized)")
     print(f"  Errors:    {stats['errors']}")
     if stats["processed"] > 0:
@@ -1066,7 +1082,7 @@ def _cmd_mcp_config(args, db_path: Path):
             "mcpServers": {
                 "mychatarchive": {
                     "command": mychatarchive_path,
-                    "args": ["--db", str(db_path), "serve"],
+                    "args": ["serve", "--db", str(db_path)],
                 }
             }
         }
@@ -1083,7 +1099,7 @@ def _cmd_mcp_config(args, db_path: Path):
             "mcpServers": {
                 "mychatarchive": {
                     "command": mychatarchive_path,
-                    "args": ["--db", str(db_path), "serve"],
+                    "args": ["serve", "--db", str(db_path)],
                 }
             }
         }

@@ -4,6 +4,7 @@ All data lives in a single .sqlite file with FTS5 and vector search via sqlite-v
 """
 
 import json
+import re
 import sqlite3
 import struct
 from pathlib import Path
@@ -30,11 +31,98 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     return con
 
 
+def _ensure_thread_summaries_v2(con: sqlite3.Connection, dim: int) -> None:
+    """Create or migrate thread_summaries to the multi-segment schema.
+
+    Old schema: canonical_thread_id TEXT PRIMARY KEY  (one row per thread)
+    New schema: summary_id TEXT PRIMARY KEY           (one row per segment)
+
+    summary_id format: "{canonical_thread_id}::{segment_index:04d}"
+
+    Migration copies old rows as segment 0 of each thread. Embeddings are
+    dropped and must be regenerated with 'mychatarchive summarize'.
+    """
+    cols = {row[1] for row in con.execute("PRAGMA table_info(thread_summaries)").fetchall()}
+
+    if "summary_id" not in cols:
+        if cols:
+            # Old single-segment schema — migrate data, keep summary text
+            con.executescript("""
+                CREATE TABLE thread_summaries_new (
+                    summary_id TEXT PRIMARY KEY,
+                    canonical_thread_id TEXT NOT NULL,
+                    segment_index INTEGER NOT NULL DEFAULT 0,
+                    title TEXT,
+                    platform TEXT,
+                    message_count INTEGER,
+                    segment_chars INTEGER,
+                    ts_start TEXT,
+                    ts_end TEXT,
+                    summary TEXT NOT NULL,
+                    key_topics TEXT,
+                    summary_model TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO thread_summaries_new
+                    (summary_id, canonical_thread_id, segment_index, title, platform,
+                     message_count, segment_chars, ts_start, ts_end, summary, key_topics,
+                     summary_model, created_at, updated_at)
+                SELECT
+                    canonical_thread_id || '::0000',
+                    canonical_thread_id, 0, title, platform,
+                    message_count, NULL, ts_start, ts_end, summary, key_topics,
+                    summary_model, created_at, updated_at
+                FROM thread_summaries;
+                DROP TABLE thread_summaries;
+                ALTER TABLE thread_summaries_new RENAME TO thread_summaries;
+            """)
+        else:
+            # Fresh install — create new schema directly
+            con.execute("""
+                CREATE TABLE thread_summaries (
+                    summary_id TEXT PRIMARY KEY,
+                    canonical_thread_id TEXT NOT NULL,
+                    segment_index INTEGER NOT NULL DEFAULT 0,
+                    title TEXT,
+                    platform TEXT,
+                    message_count INTEGER,
+                    segment_chars INTEGER,
+                    ts_start TEXT,
+                    ts_end TEXT,
+                    summary TEXT NOT NULL,
+                    key_topics TEXT,
+                    summary_model TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+        # Drop old vec table (wrong PK: canonical_thread_id) and recreate with summary_id
+        con.execute("DROP TABLE IF EXISTS vec_thread_summaries")
+        con.execute(f"""
+            CREATE VIRTUAL TABLE vec_thread_summaries
+            USING vec0(summary_id TEXT PRIMARY KEY, embedding float[{dim}] distance_metric=cosine)
+        """)
+        con.commit()
+
+    # Idempotent: ensure index and vec exist for already-migrated DBs
+    con.execute("""
+        CREATE INDEX IF NOT EXISTS idx_thread_summaries_thread
+        ON thread_summaries(canonical_thread_id)
+    """)
+    con.execute(f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS vec_thread_summaries
+        USING vec0(summary_id TEXT PRIMARY KEY, embedding float[{dim}] distance_metric=cosine)
+    """)
+    con.commit()
+
+
 def ensure_schema(con: sqlite3.Connection):
     """Create all tables (ingestion + brain). Idempotent."""
     dim = _get_embedding_dim()
     cur = con.cursor()
 
+    # thread_summaries is handled separately below (needs migration logic).
     cur.executescript("""
         CREATE TABLE IF NOT EXISTS messages (
             message_id TEXT PRIMARY KEY,
@@ -74,24 +162,7 @@ def ensure_schema(con: sqlite3.Connection):
             meta TEXT
         );
 
-        -- Thread-level LLM summaries. Pipeline slot: after Sync, before Chunk+Embed.
-        -- Enables grouping UI, profile tool, and higher-level context retrieval.
-        CREATE TABLE IF NOT EXISTS thread_summaries (
-            canonical_thread_id TEXT PRIMARY KEY,
-            title TEXT,
-            platform TEXT,
-            message_count INTEGER,
-            ts_start TEXT,
-            ts_end TEXT,
-            summary TEXT NOT NULL,
-            key_topics TEXT,        -- JSON array of keyword strings
-            summary_model TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
         -- User-curated thread groups (e.g. "jarvis", "coding", "projects").
-        -- Replaces blunt platform-filter with user intent.
         CREATE TABLE IF NOT EXISTS thread_groups (
             group_id TEXT PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
@@ -118,13 +189,10 @@ def ensure_schema(con: sqlite3.Connection):
         USING vec0(thought_id TEXT PRIMARY KEY, embedding float[{dim}] distance_metric=cosine)
     """)
 
-    # Semantic search on thread summaries (thread-level retrieval before drilling into chunks).
-    cur.execute(f"""
-        CREATE VIRTUAL TABLE IF NOT EXISTS vec_thread_summaries
-        USING vec0(canonical_thread_id TEXT PRIMARY KEY, embedding float[{dim}] distance_metric=cosine)
-    """)
-
     con.commit()
+
+    # Thread summaries: create or migrate to multi-segment schema
+    _ensure_thread_summaries_v2(con, dim)
 
 
 # --- Ingestion ---
@@ -262,8 +330,22 @@ def search_chunks(
     sort_by_time: bool = False,
     group_thread_ids: set[str] | None = None,
 ):
+    # An explicit empty set means "filter to zero threads" → nothing to return.
+    # Without this, bool(set()) is False, needs_filter ignores it, and we'd
+    # silently return global results instead of empty — wrong semantics.
+    if group_thread_ids is not None and not group_thread_ids:
+        return []
+
     needs_filter = bool(platform or cutoff_iso or group_thread_ids)
-    fetch_limit = limit * 5 if needs_filter else limit
+    # When scoping to a small set of threads, the target chunks are unlikely to appear
+    # in the global top (limit * 5) results across 90k+ chunks. Use a much larger
+    # candidate pool so filtering actually finds matching chunks.
+    if group_thread_ids and len(group_thread_ids) <= 3:
+        fetch_limit = max(limit * 15, 100)
+    elif needs_filter:
+        fetch_limit = limit * 5
+    else:
+        fetch_limit = limit
     raw = con.execute(
         "SELECT chunk_id, distance FROM vec_chunks "
         "WHERE embedding MATCH ? AND k = ?",
@@ -293,12 +375,9 @@ def search_chunks(
         params.append(cutoff_iso)
 
     if group_thread_ids:
-        if group_thread_ids:
-            placeholders = ",".join("?" * len(group_thread_ids))
-            conditions.append(f"c.canonical_thread_id IN ({placeholders})")
-            params.extend(group_thread_ids)
-        else:
-            return []  # group exists but has no members
+        placeholders = ",".join("?" * len(group_thread_ids))
+        conditions.append(f"c.canonical_thread_id IN ({placeholders})")
+        params.extend(group_thread_ids)
 
     join_clause = " JOIN messages m ON c.message_id = m.message_id" if need_message_join else ""
     where_sql = " AND ".join(conditions)
@@ -325,6 +404,14 @@ def search_thoughts(con: sqlite3.Connection, embedding: list[float], limit: int 
     ).fetchall()
 
 
+def _sanitize_fts_query(query: str) -> str:
+    """Sanitize query for FTS5 to avoid syntax errors (e.g. apostrophes in 'i've')."""
+    if not query or not isinstance(query, str):
+        return query or ""
+    # Remove apostrophes - FTS5 treats them as special and raises syntax errors
+    return re.sub(r"'", "", query.strip())
+
+
 def fts_search(
     con: sqlite3.Connection,
     query: str,
@@ -335,6 +422,9 @@ def fts_search(
     group_thread_ids: set[str] | None = None,
 ):
     """Full-text search via FTS5."""
+    query = _sanitize_fts_query(query)
+    if not query:
+        return []
     sql = """
         SELECT d.message_id, m.text, m.canonical_thread_id, m.ts, m.role, m.title
         FROM messages_fts f
@@ -478,6 +568,16 @@ def get_thread_messages(con: sqlite3.Connection, canonical_thread_id: str) -> li
     return [{"role": r[0], "text": r[1], "ts": r[2]} for r in rows]
 
 
+_SUMMARY_SELECT = """
+    SELECT summary_id, canonical_thread_id, segment_index, title, platform,
+           message_count, ts_start, ts_end, summary, key_topics
+    FROM thread_summaries
+"""
+# Column indices for the fixed 10-col layout above:
+#   summary_id[0], canonical_thread_id[1], segment_index[2], title[3],
+#   platform[4], message_count[5], ts_start[6], ts_end[7], summary[8], key_topics[9]
+
+
 def has_thread_summary(con: sqlite3.Connection, canonical_thread_id: str) -> bool:
     row = con.execute(
         "SELECT 1 FROM thread_summaries WHERE canonical_thread_id = ?",
@@ -488,10 +588,13 @@ def has_thread_summary(con: sqlite3.Connection, canonical_thread_id: str) -> boo
 
 def insert_thread_summary(
     con: sqlite3.Connection,
+    summary_id: str,
     canonical_thread_id: str,
+    segment_index: int,
     title: Optional[str],
     platform: Optional[str],
     message_count: int,
+    segment_chars: int,
     ts_start: Optional[str],
     ts_end: Optional[str],
     summary: str,
@@ -499,37 +602,78 @@ def insert_thread_summary(
     summary_model: str,
     now: str,
 ):
-    """Upsert a thread summary (replace if already exists)."""
+    """Insert or replace a single summary segment."""
     con.execute(
         """
         INSERT OR REPLACE INTO thread_summaries
-            (canonical_thread_id, title, platform, message_count,
-             ts_start, ts_end, summary, key_topics, summary_model, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,
-            COALESCE((SELECT created_at FROM thread_summaries WHERE canonical_thread_id=?), ?),
+            (summary_id, canonical_thread_id, segment_index, title, platform,
+             message_count, segment_chars, ts_start, ts_end, summary,
+             key_topics, summary_model, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,
+            COALESCE((SELECT created_at FROM thread_summaries WHERE summary_id=?), ?),
             ?)
         """,
-        (canonical_thread_id, title, platform, message_count,
-         ts_start, ts_end, summary, json.dumps(key_topics), summary_model,
-         canonical_thread_id, now, now),
+        (summary_id, canonical_thread_id, segment_index, title, platform,
+         message_count, segment_chars, ts_start, ts_end, summary,
+         json.dumps(key_topics), summary_model,
+         summary_id, now, now),
     )
 
 
 def insert_thread_summary_embedding(
-    con: sqlite3.Connection, canonical_thread_id: str, embedding: list[float]
+    con: sqlite3.Connection, summary_id: str, embedding: list[float]
 ):
+    """Insert or replace the embedding for a summary segment."""
     con.execute(
-        "INSERT OR REPLACE INTO vec_thread_summaries (canonical_thread_id, embedding) VALUES (?,?)",
-        (canonical_thread_id, serialize_f32(embedding)),
+        "INSERT OR REPLACE INTO vec_thread_summaries (summary_id, embedding) VALUES (?,?)",
+        (summary_id, serialize_f32(embedding)),
     )
 
 
-def get_thread_summary(con: sqlite3.Connection, canonical_thread_id: str):
-    """Returns (canonical_thread_id, title, platform, message_count, ts_start, ts_end,
-    summary, key_topics, summary_model, created_at, updated_at) or None."""
-    return con.execute(
-        "SELECT * FROM thread_summaries WHERE canonical_thread_id = ?",
+def delete_thread_summaries(con: sqlite3.Connection, canonical_thread_id: str) -> int:
+    """Delete all segments and embeddings for a thread. Returns number of segments deleted."""
+    summary_ids = [
+        r[0] for r in con.execute(
+            "SELECT summary_id FROM thread_summaries WHERE canonical_thread_id = ?",
+            (canonical_thread_id,),
+        ).fetchall()
+    ]
+    if summary_ids:
+        placeholders = ",".join("?" * len(summary_ids))
+        con.execute(f"DELETE FROM vec_thread_summaries WHERE summary_id IN ({placeholders})", summary_ids)
+    cur = con.execute(
+        "DELETE FROM thread_summaries WHERE canonical_thread_id = ?",
         (canonical_thread_id,),
+    )
+    return cur.rowcount
+
+
+def get_thread_summary(con: sqlite3.Connection, canonical_thread_id: str):
+    """Returns the first segment (segment_index=0) for a thread using the 10-col layout, or None."""
+    return con.execute(
+        _SUMMARY_SELECT + " WHERE canonical_thread_id = ? ORDER BY segment_index LIMIT 1",
+        (canonical_thread_id,),
+    ).fetchone()
+
+
+def get_thread_summaries(con: sqlite3.Connection, canonical_thread_id: str) -> list:
+    """Return all segments for a thread in segment_index order (10-col layout).
+
+    Returns an empty list if the thread has no summary yet.
+    Use this when you need the full picture of a thread (e.g. for display),
+    rather than get_thread_summary which returns only the first segment.
+    """
+    return con.execute(
+        _SUMMARY_SELECT + " WHERE canonical_thread_id = ? ORDER BY segment_index",
+        (canonical_thread_id,),
+    ).fetchall()
+
+
+def get_summary_by_id(con: sqlite3.Connection, summary_id: str):
+    """Fetch a single segment by summary_id using the 10-col layout."""
+    return con.execute(
+        _SUMMARY_SELECT + " WHERE summary_id = ?",
+        (summary_id,),
     ).fetchone()
 
 
@@ -539,11 +683,12 @@ def list_thread_summaries(
     platform: Optional[str] = None,
     since_iso: Optional[str] = None,
 ):
-    """Returns rows: (canonical_thread_id, title, platform, ts_start, ts_end, summary, key_topics)."""
-    sql = """
-        SELECT canonical_thread_id, title, platform, ts_start, ts_end, summary, key_topics
-        FROM thread_summaries
+    """Returns rows in the 10-col layout, one row per segment, ordered newest first.
+
+    10-col layout: summary_id[0], canonical_thread_id[1], segment_index[2], title[3],
+    platform[4], message_count[5], ts_start[6], ts_end[7], summary[8], key_topics[9].
     """
+    sql = _SUMMARY_SELECT
     params: list = []
     conditions = []
     if platform:
@@ -554,7 +699,7 @@ def list_thread_summaries(
         params.append(since_iso)
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
-    sql += " ORDER BY ts_start DESC LIMIT ?"
+    sql += " ORDER BY ts_start DESC, segment_index ASC LIMIT ?"
     params.append(limit)
     return con.execute(sql, params).fetchall()
 
@@ -562,17 +707,28 @@ def list_thread_summaries(
 def search_thread_summaries(
     con: sqlite3.Connection, embedding: list[float], limit: int = 10
 ):
-    """Vector KNN search on thread summaries. Returns [(thread_id, distance)]."""
+    """Vector KNN search on thread summaries. Returns [(summary_id, distance)]."""
     return con.execute(
-        "SELECT canonical_thread_id, distance FROM vec_thread_summaries "
+        "SELECT summary_id, distance FROM vec_thread_summaries "
         "WHERE embedding MATCH ? AND k = ?",
         (serialize_f32(embedding), limit),
     ).fetchall()
 
 
 def summary_count(con: sqlite3.Connection) -> int:
+    """Number of summary segments (not threads)."""
     try:
         return con.execute("SELECT count(*) FROM thread_summaries").fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
+
+
+def summarized_thread_count(con: sqlite3.Connection) -> int:
+    """Number of distinct threads that have at least one summary segment."""
+    try:
+        return con.execute(
+            "SELECT count(DISTINCT canonical_thread_id) FROM thread_summaries"
+        ).fetchone()[0]
     except sqlite3.OperationalError:
         return 0
 

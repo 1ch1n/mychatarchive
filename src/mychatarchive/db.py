@@ -164,33 +164,75 @@ def has_thread_summary(con, canonical_thread_id: str) -> bool:
     return _b().has_thread_summary(con, canonical_thread_id)
 
 
-def insert_thread_summary(con, canonical_thread_id: str, title, platform,
-                          message_count: int, ts_start, ts_end,
-                          summary: str, key_topics: list, summary_model: str, now: str):
+def insert_thread_summary(
+    con,
+    summary_id: str,
+    canonical_thread_id: str,
+    segment_index: int,
+    title,
+    platform,
+    message_count: int,
+    segment_chars: int,
+    ts_start,
+    ts_end,
+    summary: str,
+    key_topics: list,
+    summary_model: str,
+    now: str,
+):
     return _b().insert_thread_summary(
-        con, canonical_thread_id, title, platform, message_count,
-        ts_start, ts_end, summary, key_topics, summary_model, now,
+        con, summary_id, canonical_thread_id, segment_index, title, platform,
+        message_count, segment_chars, ts_start, ts_end, summary, key_topics, summary_model, now,
     )
 
 
-def insert_thread_summary_embedding(con, canonical_thread_id: str, embedding: list[float]):
-    return _b().insert_thread_summary_embedding(con, canonical_thread_id, embedding)
+def insert_thread_summary_embedding(con, summary_id: str, embedding: list[float]):
+    return _b().insert_thread_summary_embedding(con, summary_id, embedding)
+
+
+def delete_thread_summaries(con, canonical_thread_id: str) -> int:
+    """Delete all segments and embeddings for a thread. Returns number of segments deleted."""
+    return _b().delete_thread_summaries(con, canonical_thread_id)
 
 
 def get_thread_summary(con, canonical_thread_id: str):
+    """Returns the first segment (segment_index=0) for a thread using the 10-col layout, or None."""
     return _b().get_thread_summary(con, canonical_thread_id)
 
 
+def get_thread_summaries(con, canonical_thread_id: str) -> list:
+    """Return all segments for a thread in segment_index order (10-col layout).
+
+    10-col: summary_id[0], canonical_thread_id[1], segment_index[2], title[3],
+    platform[4], message_count[5], ts_start[6], ts_end[7], summary[8], key_topics[9].
+    """
+    return _b().get_thread_summaries(con, canonical_thread_id)
+
+
+def get_summary_by_id(con, summary_id: str):
+    """Fetch a single segment by summary_id using the 10-col layout."""
+    return _b().get_summary_by_id(con, summary_id)
+
+
 def list_thread_summaries(con, limit: int = 100, platform=None, since_iso=None):
+    """10-col layout: summary_id[0], canonical_thread_id[1], segment_index[2], title[3],
+    platform[4], message_count[5], ts_start[6], ts_end[7], summary[8], key_topics[9]."""
     return _b().list_thread_summaries(con, limit=limit, platform=platform, since_iso=since_iso)
 
 
 def search_thread_summaries(con, embedding: list[float], limit: int = 10):
+    """Returns [(summary_id, distance)]."""
     return _b().search_thread_summaries(con, embedding, limit)
 
 
 def summary_count(con) -> int:
+    """Number of summary segments."""
     return _b().summary_count(con)
+
+
+def summarized_thread_count(con) -> int:
+    """Number of distinct threads with at least one summary segment."""
+    return _b().summarized_thread_count(con)
 
 
 def unsummarized_thread_count(con) -> int:
