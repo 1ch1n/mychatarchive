@@ -249,7 +249,7 @@ def _cmd_init():
     print(f"  Backend (current: {current_storage}):")
     print("    1. sqlite  - Local SQLite file (default)")
     print("    2. postgres - PostgreSQL (coming soon)")
-    choice = input("  Choose [1]: ").strip() or "1"
+    choice = input("  Choose (default 1): ").strip() or "1"
     if choice == "2":
         print("    Postgres support is coming soon. Using sqlite for now.")
         choice = "1"
@@ -270,7 +270,7 @@ def _cmd_init():
     print("    1. local  - sentence-transformers, runs on your machine (default)")
     print("    2. openai - OpenAI API (text-embedding-3-small/large, best quality)")
     print("    3. openrouter - OpenRouter API embeddings (coming soon)")
-    choice = input("  Choose [1]: ").strip() or "1"
+    choice = input("  Choose (default 1): ").strip() or "1"
     if choice == "1":
         cfg["embeddings"]["backend"] = "local"
     elif choice == "2":
@@ -284,7 +284,7 @@ def _cmd_init():
         if key_input:
             cfg["embeddings"]["openai_api_key"] = key_input
         model_choice = input(
-            "  Model [1=small/1536dim, 2=large/3072dim] [1]: "
+            "  Model [1=small/1536dim, 2=large/3072dim] (default 1): "
         ).strip() or "1"
         if model_choice == "2":
             cfg["embeddings"]["model"] = "text-embedding-3-large"
@@ -301,7 +301,7 @@ def _cmd_init():
     print(f"  Transport (current: {current_transport}):")
     print("    1. stdio - Local pipe, for Claude Desktop/Cursor (default)")
     print("    2. sse   - HTTP server, for remote/mobile access")
-    choice = input("  Choose [1]: ").strip() or "1"
+    choice = input("  Choose (default 1): ").strip() or "1"
     cfg["transport"]["type"] = transport_options.get(choice, "stdio")
 
     if cfg["transport"]["type"] == "sse":
