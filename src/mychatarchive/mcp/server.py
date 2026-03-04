@@ -63,6 +63,16 @@ def get_current_datetime() -> str:
     return json.dumps(data, indent=2)
 
 
+def _resolve_group_thread_ids(con, group: str | None) -> set | None:
+    """Resolve group name → set of thread IDs (or None if no group filter)."""
+    if not group:
+        return None
+    group_row = db.get_group_by_name(con, group)
+    if not group_row:
+        return set()  # group doesn't exist → return empty set (no results)
+    return db.get_group_thread_ids(con, group_row[0])
+
+
 @mcp.tool()
 def search_brain(
     query: str,
@@ -71,6 +81,7 @@ def search_brain(
     hours_back: int | None = None,
     since: str | None = None,
     sort_by_time: bool = False,
+    group: str | None = None,
 ) -> str:
     """Semantic search across all chat history by meaning.
 
@@ -85,10 +96,12 @@ def search_brain(
         hours_back: Only include messages from the last N hours
         since: Only include messages from this date (YYYY-MM-DD)
         sort_by_time: If true, sort by newest first instead of relevance
+        group: Filter to threads in this user-curated group (e.g. "jarvis", "coding")
     """
     con = _get_con()
     embedding = _lazy_embed(query)
     platforms = [p.strip() for p in platform.split(",")] if platform else None
+    group_thread_ids = _resolve_group_thread_ids(con, group)
 
     cutoff_iso = None
     if hours_back is not None:
@@ -106,6 +119,7 @@ def search_brain(
     results = db.search_chunks(
         con, embedding, limit=limit, platform=platforms,
         cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+        group_thread_ids=group_thread_ids,
     )
 
     if not results:
@@ -185,6 +199,7 @@ def get_context(
     hours_back: int | None = None,
     since: str | None = None,
     sort_by_time: bool = False,
+    group: str | None = None,
 ) -> str:
     """Given a topic, return a comprehensive context bundle.
 
@@ -199,10 +214,12 @@ def get_context(
         hours_back: Only include messages from the last N hours
         since: Only include messages from this date (YYYY-MM-DD)
         sort_by_time: If true, sort by newest first instead of relevance
+        group: Filter to threads in this user-curated group (e.g. "jarvis", "coding")
     """
     con = _get_con()
     embedding = _lazy_embed(topic)
     platforms = [p.strip() for p in platform.split(",")] if platform else None
+    group_thread_ids = _resolve_group_thread_ids(con, group)
 
     cutoff_iso = None
     if hours_back is not None:
@@ -215,11 +232,13 @@ def get_context(
             dt = datetime.datetime.strptime(since, "%Y-%m-%d")
             cutoff_iso = dt.replace(tzinfo=datetime.timezone.utc).isoformat()
         except ValueError:
-            return json.dumps({"error": "Invalid since format. Use YYYY-MM-DD.", **_current_datetime_json()})
+            return json.dumps({"error": "Invalid since format. Use YYYY-MM-DD.",
+                               **_current_datetime_json()})
 
     chunk_results = db.search_chunks(
         con, embedding, limit=limit, platform=platforms,
         cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+        group_thread_ids=group_thread_ids,
     )
     thought_results = db.search_thoughts(con, embedding, limit=5)
 
@@ -239,6 +258,20 @@ def get_context(
             })
             thread_ids.add(row[1])
 
+    # Include thread-level summaries for matched threads (richer context)
+    thread_summaries_out = []
+    for tid in list(thread_ids)[:5]:
+        summary_row = db.get_thread_summary(con, tid)
+        if summary_row:
+            thread_summaries_out.append({
+                "thread_id": tid,
+                "title": summary_row[1],
+                "summary": summary_row[6],
+                "key_topics": json.loads(summary_row[7]) if summary_row[7] else [],
+                "ts_start": summary_row[4],
+                "ts_end": summary_row[5],
+            })
+
     related_thoughts = []
     for thought_id, distance in thought_results:
         row = db.get_thought_by_id(con, thought_id)
@@ -252,6 +285,7 @@ def get_context(
     out = {
         "topic": topic,
         "related_messages": related_messages,
+        "thread_summaries": thread_summaries_out,
         "related_thoughts": related_thoughts,
         "unique_threads": len(thread_ids),
         **_current_datetime_json(),
@@ -287,6 +321,103 @@ def capture_thought(thought: str, tags: str = "") -> str:
         "preview": thought[:200],
         **_current_datetime_json(),
     }
+    return json.dumps(out, indent=2)
+
+
+@mcp.tool()
+def get_profile(
+    days_back: int = 30,
+    platform: str | None = None,
+    group: str | None = None,
+) -> str:
+    """Get a snapshot of the user's current context: active projects, themes, recent focus.
+
+    Use this at the start of a session to understand who the user is and what
+    they're currently working on. Returns thread summaries (if available) plus
+    recent conversations and captured thoughts.
+
+    Stolen from Supermemory's "user profile" concept — but built on lossless archive data.
+
+    Args:
+        days_back: How many days of history to include (default 30)
+        platform: Filter by platform (chatgpt, anthropic, grok, claude_code, cursor)
+        group: Filter to threads in a specific group (e.g. "jarvis", "coding")
+    """
+    con = _get_con()
+    cutoff = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_back)
+    ).isoformat()
+    platforms = [p.strip() for p in platform.split(",")] if platform else None
+    group_thread_ids = _resolve_group_thread_ids(con, group)
+
+    # 1. Thread summaries from the recent window (thread-level context)
+    recent_summaries_raw = db.list_thread_summaries(
+        con, limit=20, platform=platform, since_iso=cutoff
+    )
+    thread_summaries = []
+    for row in recent_summaries_raw:
+        # Filter by group if specified
+        if group_thread_ids is not None and row[0] not in group_thread_ids:
+            continue
+        thread_summaries.append({
+            "thread_id": row[0],
+            "title": row[1],
+            "platform": row[2],
+            "ts_start": row[3],
+            "ts_end": row[4],
+            "summary": row[5],
+            "key_topics": json.loads(row[6]) if row[6] else [],
+        })
+
+    # 2. Recent message chunks (always include — fallback if no summaries)
+    chunk_rows = db.get_recent_chunks(con, cutoff, limit=15, platform=platforms)
+    recent_messages = []
+    seen_threads: set[str] = set()
+    for row in chunk_rows:
+        tid = row[2]
+        if group_thread_ids is not None and tid not in group_thread_ids:
+            continue
+        meta = json.loads(row[4]) if row[4] else {}
+        seen_threads.add(tid)
+        recent_messages.append({
+            "text": row[1][:400],
+            "thread_id": tid,
+            "timestamp": row[3],
+            "role": meta.get("role", ""),
+            "title": meta.get("title", ""),
+        })
+
+    # 3. Recent captured thoughts
+    thought_rows = db.get_recent_thoughts(con, cutoff, limit=10)
+    thoughts = [{"text": r[1], "created_at": r[2]} for r in thought_rows]
+
+    # 4. Aggregate key topics from summaries for a "focus areas" view
+    all_topics: dict[str, int] = {}
+    for s in thread_summaries:
+        for t in s.get("key_topics", []):
+            all_topics[t] = all_topics.get(t, 0) + 1
+    top_topics = sorted(all_topics.items(), key=lambda x: -x[1])[:15]
+
+    out = {
+        "profile_window_days": days_back,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "group_filter": group,
+        "platform_filter": platform,
+        "recent_threads_count": len(seen_threads | {s["thread_id"] for s in thread_summaries}),
+        "focus_areas": [t for t, _ in top_topics],
+        "thread_summaries": thread_summaries[:10],
+        "recent_messages": recent_messages[:10],
+        "captured_thoughts": thoughts,
+        "hint": (
+            "No thread summaries found — run 'mychatarchive summarize' to generate them "
+            "for richer profile context."
+        ) if not thread_summaries else None,
+        **_current_datetime_json(),
+    }
+    # Remove null hint
+    if out.get("hint") is None:
+        del out["hint"]
+
     return json.dumps(out, indent=2)
 
 

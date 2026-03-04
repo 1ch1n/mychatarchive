@@ -92,10 +92,12 @@ def search_chunks(
     platform: str | list[str] | None = None,
     cutoff_iso: str | None = None,
     sort_by_time: bool = False,
+    group_thread_ids: set | None = None,
 ):
     return _b().search_chunks(
         con, embedding, limit=limit, platform=platform,
         cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+        group_thread_ids=group_thread_ids,
     )
 
 
@@ -110,10 +112,12 @@ def fts_search(
     platform: str | list[str] | None = None,
     cutoff_iso: str | None = None,
     sort_by_time: bool = False,
+    group_thread_ids: set | None = None,
 ):
     return _b().fts_search(
         con, query, limit=limit, platform=platform,
         cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+        group_thread_ids=group_thread_ids,
     )
 
 
@@ -139,48 +143,93 @@ def get_thought_by_id(con, thought_id: str):
 
 
 def export_messages(con, platform: str | None = None, limit: int | None = None):
-    """Export all messages as dicts, optionally filtered by platform."""
-    query = """
-        SELECT message_id, canonical_thread_id, platform, account_id,
-               ts, role, text, title, source_id
-        FROM messages ORDER BY platform, canonical_thread_id, ts
-    """
-    params: list = []
-    if platform:
-        query = query.replace("ORDER BY", "WHERE platform = ? ORDER BY")
-        params.append(platform)
-    if limit:
-        query += " LIMIT ?"
-        params.append(limit)
-
-    rows = con.execute(query, params).fetchall()
-    return [
-        {
-            "message_id": r[0],
-            "thread_id": r[1],
-            "platform": r[2],
-            "account_id": r[3],
-            "timestamp": r[4],
-            "role": r[5],
-            "content": r[6],
-            "title": r[7],
-            "source_id": r[8],
-        }
-        for r in rows
-    ]
+    return _b().export_messages(con, platform=platform, limit=limit)
 
 
 def export_thoughts(con):
-    """Export all thoughts as dicts."""
-    rows = con.execute(
-        "SELECT thought_id, text, created_at, meta FROM thoughts ORDER BY created_at"
-    ).fetchall()
-    return [
-        {
-            "thought_id": r[0],
-            "content": r[1],
-            "created_at": r[2],
-            "metadata": r[3],
-        }
-        for r in rows
-    ]
+    return _b().export_thoughts(con)
+
+
+# ── Thread summaries ──────────────────────────────────────────────────────────
+
+def iter_threads(con):
+    return _b().iter_threads(con)
+
+
+def get_thread_messages(con, canonical_thread_id: str) -> list[dict]:
+    return _b().get_thread_messages(con, canonical_thread_id)
+
+
+def has_thread_summary(con, canonical_thread_id: str) -> bool:
+    return _b().has_thread_summary(con, canonical_thread_id)
+
+
+def insert_thread_summary(con, canonical_thread_id: str, title, platform,
+                          message_count: int, ts_start, ts_end,
+                          summary: str, key_topics: list, summary_model: str, now: str):
+    return _b().insert_thread_summary(
+        con, canonical_thread_id, title, platform, message_count,
+        ts_start, ts_end, summary, key_topics, summary_model, now,
+    )
+
+
+def insert_thread_summary_embedding(con, canonical_thread_id: str, embedding: list[float]):
+    return _b().insert_thread_summary_embedding(con, canonical_thread_id, embedding)
+
+
+def get_thread_summary(con, canonical_thread_id: str):
+    return _b().get_thread_summary(con, canonical_thread_id)
+
+
+def list_thread_summaries(con, limit: int = 100, platform=None, since_iso=None):
+    return _b().list_thread_summaries(con, limit=limit, platform=platform, since_iso=since_iso)
+
+
+def search_thread_summaries(con, embedding: list[float], limit: int = 10):
+    return _b().search_thread_summaries(con, embedding, limit)
+
+
+def summary_count(con) -> int:
+    return _b().summary_count(con)
+
+
+def unsummarized_thread_count(con) -> int:
+    return _b().unsummarized_thread_count(con)
+
+
+# ── Thread groups ─────────────────────────────────────────────────────────────
+
+def create_group(con, group_id: str, name: str, description, now: str) -> bool:
+    return _b().create_group(con, group_id, name, description, now)
+
+
+def list_groups(con) -> list:
+    return _b().list_groups(con)
+
+
+def get_group_by_name(con, name: str):
+    return _b().get_group_by_name(con, name)
+
+
+def add_to_group(con, canonical_thread_id: str, group_id: str, now: str) -> bool:
+    return _b().add_to_group(con, canonical_thread_id, group_id, now)
+
+
+def remove_from_group(con, canonical_thread_id: str, group_id: str) -> bool:
+    return _b().remove_from_group(con, canonical_thread_id, group_id)
+
+
+def delete_group(con, group_id: str) -> bool:
+    return _b().delete_group(con, group_id)
+
+
+def get_threads_in_group(con, group_id: str) -> list[dict]:
+    return _b().get_threads_in_group(con, group_id)
+
+
+def get_group_thread_ids(con, group_id: str) -> set:
+    return _b().get_group_thread_ids(con, group_id)
+
+
+def group_count(con) -> int:
+    return _b().group_count(con)

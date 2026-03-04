@@ -73,6 +73,39 @@ def ensure_schema(con: sqlite3.Connection):
             created_at TEXT NOT NULL,
             meta TEXT
         );
+
+        -- Thread-level LLM summaries. Pipeline slot: after Sync, before Chunk+Embed.
+        -- Enables grouping UI, profile tool, and higher-level context retrieval.
+        CREATE TABLE IF NOT EXISTS thread_summaries (
+            canonical_thread_id TEXT PRIMARY KEY,
+            title TEXT,
+            platform TEXT,
+            message_count INTEGER,
+            ts_start TEXT,
+            ts_end TEXT,
+            summary TEXT NOT NULL,
+            key_topics TEXT,        -- JSON array of keyword strings
+            summary_model TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        -- User-curated thread groups (e.g. "jarvis", "coding", "projects").
+        -- Replaces blunt platform-filter with user intent.
+        CREATE TABLE IF NOT EXISTS thread_groups (
+            group_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        -- Many-to-many: threads belong to one or more groups.
+        CREATE TABLE IF NOT EXISTS thread_group_members (
+            canonical_thread_id TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            added_at TEXT NOT NULL,
+            PRIMARY KEY (canonical_thread_id, group_id)
+        );
     """)
 
     cur.execute(f"""
@@ -83,6 +116,12 @@ def ensure_schema(con: sqlite3.Connection):
     cur.execute(f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_thoughts
         USING vec0(thought_id TEXT PRIMARY KEY, embedding float[{dim}] distance_metric=cosine)
+    """)
+
+    # Semantic search on thread summaries (thread-level retrieval before drilling into chunks).
+    cur.execute(f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS vec_thread_summaries
+        USING vec0(canonical_thread_id TEXT PRIMARY KEY, embedding float[{dim}] distance_metric=cosine)
     """)
 
     con.commit()
@@ -221,15 +260,17 @@ def search_chunks(
     platform: str | list[str] | None = None,
     cutoff_iso: str | None = None,
     sort_by_time: bool = False,
+    group_thread_ids: set[str] | None = None,
 ):
-    fetch_limit = limit * 5 if (platform or cutoff_iso) else limit
+    needs_filter = bool(platform or cutoff_iso or group_thread_ids)
+    fetch_limit = limit * 5 if needs_filter else limit
     raw = con.execute(
         "SELECT chunk_id, distance FROM vec_chunks "
         "WHERE embedding MATCH ? AND k = ?",
         (serialize_f32(embedding), fetch_limit),
     ).fetchall()
 
-    if not platform and not cutoff_iso and not sort_by_time:
+    if not needs_filter and not sort_by_time:
         return raw[:limit]
 
     chunk_ids = [r[0] for r in raw]
@@ -238,6 +279,8 @@ def search_chunks(
 
     conditions = [f"c.chunk_id IN ({','.join('?' * len(chunk_ids))})"]
     params: list = list(chunk_ids)
+
+    need_message_join = bool(platform)
 
     if platform:
         platforms = [platform] if isinstance(platform, str) else platform
@@ -249,15 +292,19 @@ def search_chunks(
         conditions.append("c.ts_start >= ?")
         params.append(cutoff_iso)
 
-    join_clause = " JOIN messages m ON c.message_id = m.message_id" if platform else ""
+    if group_thread_ids:
+        if group_thread_ids:
+            placeholders = ",".join("?" * len(group_thread_ids))
+            conditions.append(f"c.canonical_thread_id IN ({placeholders})")
+            params.extend(group_thread_ids)
+        else:
+            return []  # group exists but has no members
+
+    join_clause = " JOIN messages m ON c.message_id = m.message_id" if need_message_join else ""
     where_sql = " AND ".join(conditions)
 
     matching_rows = con.execute(
-        f"""
-        SELECT c.chunk_id, c.ts_start FROM chunks c
-        {join_clause}
-        WHERE {where_sql}
-        """.replace("  ", " ").strip(),
+        f"SELECT c.chunk_id, c.ts_start FROM chunks c {join_clause} WHERE {where_sql}",
         params,
     ).fetchall()
 
@@ -267,8 +314,7 @@ def search_chunks(
     if sort_by_time:
         matched.sort(key=lambda x: x[1] or "", reverse=True)
 
-    result = [(c, d) for c, ts, d in matched[:limit]]
-    return result
+    return [(c, d) for c, ts, d in matched[:limit]]
 
 
 def search_thoughts(con: sqlite3.Connection, embedding: list[float], limit: int = 10):
@@ -286,6 +332,7 @@ def fts_search(
     platform: str | list[str] | None = None,
     cutoff_iso: str | None = None,
     sort_by_time: bool = False,
+    group_thread_ids: set[str] | None = None,
 ):
     """Full-text search via FTS5."""
     sql = """
@@ -304,6 +351,10 @@ def fts_search(
     if cutoff_iso:
         sql += " AND m.ts >= ?"
         params.append(cutoff_iso)
+    if group_thread_ids:
+        placeholders = ",".join("?" * len(group_thread_ids))
+        sql += f" AND m.canonical_thread_id IN ({placeholders})"
+        params.extend(group_thread_ids)
     if sort_by_time:
         sql += " ORDER BY m.ts DESC"
     sql += " LIMIT ?"
@@ -358,3 +409,288 @@ def get_thought_by_id(con: sqlite3.Connection, thought_id: str):
         "SELECT text, created_at, meta FROM thoughts WHERE thought_id = ?",
         (thought_id,),
     ).fetchone()
+
+
+# ── Export helpers ────────────────────────────────────────────────────────────
+
+def export_messages(con: sqlite3.Connection, platform: Optional[str] = None,
+                    limit: Optional[int] = None):
+    query = """
+        SELECT message_id, canonical_thread_id, platform, account_id,
+               ts, role, text, title, source_id
+        FROM messages ORDER BY platform, canonical_thread_id, ts
+    """
+    params: list = []
+    if platform:
+        query = query.replace("ORDER BY", "WHERE platform = ? ORDER BY")
+        params.append(platform)
+    if limit:
+        query += " LIMIT ?"
+        params.append(limit)
+    rows = con.execute(query, params).fetchall()
+    return [
+        {"message_id": r[0], "thread_id": r[1], "platform": r[2], "account_id": r[3],
+         "timestamp": r[4], "role": r[5], "content": r[6], "title": r[7], "source_id": r[8]}
+        for r in rows
+    ]
+
+
+def export_thoughts(con: sqlite3.Connection):
+    rows = con.execute(
+        "SELECT thought_id, text, created_at, meta FROM thoughts ORDER BY created_at"
+    ).fetchall()
+    return [{"thought_id": r[0], "content": r[1], "created_at": r[2], "metadata": r[3]}
+            for r in rows]
+
+
+# ── Thread iteration + summaries ─────────────────────────────────────────────
+
+def iter_threads(con: sqlite3.Connection):
+    """Yield one dict per unique thread with metadata aggregated from messages."""
+    cur = con.execute("""
+        SELECT canonical_thread_id,
+               MAX(platform) AS platform,
+               MAX(title) AS title,
+               COUNT(*) AS message_count,
+               MIN(ts) AS ts_start,
+               MAX(ts) AS ts_end
+        FROM messages
+        GROUP BY canonical_thread_id
+        ORDER BY ts_start ASC
+    """)
+    for row in cur:
+        yield {
+            "canonical_thread_id": row[0],
+            "platform": row[1],
+            "title": row[2],
+            "message_count": row[3],
+            "ts_start": row[4],
+            "ts_end": row[5],
+        }
+
+
+def get_thread_messages(con: sqlite3.Connection, canonical_thread_id: str) -> list[dict]:
+    """Return all messages for a thread, ordered chronologically."""
+    rows = con.execute(
+        "SELECT role, text, ts FROM messages WHERE canonical_thread_id = ? ORDER BY ts",
+        (canonical_thread_id,),
+    ).fetchall()
+    return [{"role": r[0], "text": r[1], "ts": r[2]} for r in rows]
+
+
+def has_thread_summary(con: sqlite3.Connection, canonical_thread_id: str) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM thread_summaries WHERE canonical_thread_id = ?",
+        (canonical_thread_id,),
+    ).fetchone()
+    return row is not None
+
+
+def insert_thread_summary(
+    con: sqlite3.Connection,
+    canonical_thread_id: str,
+    title: Optional[str],
+    platform: Optional[str],
+    message_count: int,
+    ts_start: Optional[str],
+    ts_end: Optional[str],
+    summary: str,
+    key_topics: list[str],
+    summary_model: str,
+    now: str,
+):
+    """Upsert a thread summary (replace if already exists)."""
+    con.execute(
+        """
+        INSERT OR REPLACE INTO thread_summaries
+            (canonical_thread_id, title, platform, message_count,
+             ts_start, ts_end, summary, key_topics, summary_model, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,
+            COALESCE((SELECT created_at FROM thread_summaries WHERE canonical_thread_id=?), ?),
+            ?)
+        """,
+        (canonical_thread_id, title, platform, message_count,
+         ts_start, ts_end, summary, json.dumps(key_topics), summary_model,
+         canonical_thread_id, now, now),
+    )
+
+
+def insert_thread_summary_embedding(
+    con: sqlite3.Connection, canonical_thread_id: str, embedding: list[float]
+):
+    con.execute(
+        "INSERT OR REPLACE INTO vec_thread_summaries (canonical_thread_id, embedding) VALUES (?,?)",
+        (canonical_thread_id, serialize_f32(embedding)),
+    )
+
+
+def get_thread_summary(con: sqlite3.Connection, canonical_thread_id: str):
+    """Returns (canonical_thread_id, title, platform, message_count, ts_start, ts_end,
+    summary, key_topics, summary_model, created_at, updated_at) or None."""
+    return con.execute(
+        "SELECT * FROM thread_summaries WHERE canonical_thread_id = ?",
+        (canonical_thread_id,),
+    ).fetchone()
+
+
+def list_thread_summaries(
+    con: sqlite3.Connection,
+    limit: int = 100,
+    platform: Optional[str] = None,
+    since_iso: Optional[str] = None,
+):
+    """Returns rows: (canonical_thread_id, title, platform, ts_start, ts_end, summary, key_topics)."""
+    sql = """
+        SELECT canonical_thread_id, title, platform, ts_start, ts_end, summary, key_topics
+        FROM thread_summaries
+    """
+    params: list = []
+    conditions = []
+    if platform:
+        conditions.append("platform = ?")
+        params.append(platform)
+    if since_iso:
+        conditions.append("ts_start >= ?")
+        params.append(since_iso)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY ts_start DESC LIMIT ?"
+    params.append(limit)
+    return con.execute(sql, params).fetchall()
+
+
+def search_thread_summaries(
+    con: sqlite3.Connection, embedding: list[float], limit: int = 10
+):
+    """Vector KNN search on thread summaries. Returns [(thread_id, distance)]."""
+    return con.execute(
+        "SELECT canonical_thread_id, distance FROM vec_thread_summaries "
+        "WHERE embedding MATCH ? AND k = ?",
+        (serialize_f32(embedding), limit),
+    ).fetchall()
+
+
+def summary_count(con: sqlite3.Connection) -> int:
+    try:
+        return con.execute("SELECT count(*) FROM thread_summaries").fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
+
+
+def unsummarized_thread_count(con: sqlite3.Connection) -> int:
+    """Threads that have messages but no summary yet."""
+    row = con.execute("""
+        SELECT count(DISTINCT canonical_thread_id) FROM messages
+        WHERE canonical_thread_id NOT IN (SELECT canonical_thread_id FROM thread_summaries)
+    """).fetchone()
+    return row[0] if row else 0
+
+
+# ── Thread groups ─────────────────────────────────────────────────────────────
+
+def create_group(
+    con: sqlite3.Connection,
+    group_id: str,
+    name: str,
+    description: Optional[str],
+    now: str,
+) -> bool:
+    """Create a new group. Returns False if name already exists."""
+    try:
+        con.execute(
+            "INSERT INTO thread_groups (group_id, name, description, created_at) VALUES (?,?,?,?)",
+            (group_id, name, description, now),
+        )
+        con.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def list_groups(con: sqlite3.Connection) -> list[tuple]:
+    """Returns (group_id, name, description, created_at, member_count) per group."""
+    return con.execute("""
+        SELECT g.group_id, g.name, g.description, g.created_at,
+               COUNT(m.canonical_thread_id) AS member_count
+        FROM thread_groups g
+        LEFT JOIN thread_group_members m ON g.group_id = m.group_id
+        GROUP BY g.group_id
+        ORDER BY g.name
+    """).fetchall()
+
+
+def get_group_by_name(con: sqlite3.Connection, name: str):
+    """Returns (group_id, name, description, created_at) or None."""
+    return con.execute(
+        "SELECT group_id, name, description, created_at FROM thread_groups WHERE name = ?",
+        (name,),
+    ).fetchone()
+
+
+def add_to_group(
+    con: sqlite3.Connection,
+    canonical_thread_id: str,
+    group_id: str,
+    now: str,
+) -> bool:
+    """Add a thread to a group. Returns True if inserted, False if already a member."""
+    cur = con.execute(
+        "INSERT OR IGNORE INTO thread_group_members (canonical_thread_id, group_id, added_at) "
+        "VALUES (?,?,?)",
+        (canonical_thread_id, group_id, now),
+    )
+    return cur.rowcount > 0
+
+
+def remove_from_group(con: sqlite3.Connection, canonical_thread_id: str, group_id: str) -> bool:
+    cur = con.execute(
+        "DELETE FROM thread_group_members WHERE canonical_thread_id = ? AND group_id = ?",
+        (canonical_thread_id, group_id),
+    )
+    return cur.rowcount > 0
+
+
+def delete_group(con: sqlite3.Connection, group_id: str) -> bool:
+    """Delete a group and all its memberships."""
+    con.execute("DELETE FROM thread_group_members WHERE group_id = ?", (group_id,))
+    cur = con.execute("DELETE FROM thread_groups WHERE group_id = ?", (group_id,))
+    con.commit()
+    return cur.rowcount > 0
+
+
+def get_threads_in_group(con: sqlite3.Connection, group_id: str) -> list[dict]:
+    """Return thread metadata for all members of a group."""
+    rows = con.execute("""
+        SELECT m.canonical_thread_id,
+               MAX(msgs.platform) AS platform,
+               MAX(msgs.title) AS title,
+               COUNT(msgs.message_id) AS message_count,
+               MIN(msgs.ts) AS ts_start,
+               MAX(msgs.ts) AS ts_end
+        FROM thread_group_members m
+        JOIN messages msgs ON msgs.canonical_thread_id = m.canonical_thread_id
+        WHERE m.group_id = ?
+        GROUP BY m.canonical_thread_id
+        ORDER BY ts_start DESC
+    """, (group_id,)).fetchall()
+    return [
+        {"canonical_thread_id": r[0], "platform": r[1], "title": r[2],
+         "message_count": r[3], "ts_start": r[4], "ts_end": r[5]}
+        for r in rows
+    ]
+
+
+def get_group_thread_ids(con: sqlite3.Connection, group_id: str) -> set[str]:
+    """Return the set of canonical_thread_ids belonging to a group."""
+    rows = con.execute(
+        "SELECT canonical_thread_id FROM thread_group_members WHERE group_id = ?",
+        (group_id,),
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def group_count(con: sqlite3.Connection) -> int:
+    try:
+        return con.execute("SELECT count(*) FROM thread_groups").fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
