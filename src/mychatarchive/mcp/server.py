@@ -1,6 +1,6 @@
 """MCP server exposing MyChatArchive as tools for Claude Desktop, Cursor, and other MCP clients.
 
-Tools: search_brain, search_recent, get_context, capture_thought
+Tools: search_brain, search_recent, get_context, capture_thought, get_current_datetime
 Transport: stdio (default) or sse (for remote access)
 
 IMPORTANT: Never print() to stdout -- it corrupts the JSON-RPC stream.
@@ -42,11 +42,35 @@ def _lazy_embed(text: str) -> list[float]:
     return embed_single(text)
 
 
+def _current_datetime_json() -> dict:
+    """Current UTC datetime for injection into tool responses."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return {
+        "current_datetime_utc": now.isoformat(),
+        "current_date": now.strftime("%Y-%m-%d"),
+        "current_time_utc": now.strftime("%H:%M:%S"),
+    }
+
+
+@mcp.tool()
+def get_current_datetime() -> str:
+    """Return the current date and time (UTC).
+
+    Use this when you need to know today's date, the current time, or
+    temporal context for interpreting archived messages.
+    """
+    data = _current_datetime_json()
+    return json.dumps(data, indent=2)
+
+
 @mcp.tool()
 def search_brain(
     query: str,
     limit: int = 10,
     platform: str | None = None,
+    hours_back: int | None = None,
+    since: str | None = None,
+    sort_by_time: bool = False,
 ) -> str:
     """Semantic search across all chat history by meaning.
 
@@ -58,14 +82,35 @@ def search_brain(
         limit: Maximum number of results (default 10)
         platform: Filter by platform (chatgpt, anthropic, grok, claude_code, cursor).
             Omit to search all. Comma-separated for multiple: "chatgpt,anthropic,grok".
+        hours_back: Only include messages from the last N hours
+        since: Only include messages from this date (YYYY-MM-DD)
+        sort_by_time: If true, sort by newest first instead of relevance
     """
     con = _get_con()
     embedding = _lazy_embed(query)
     platforms = [p.strip() for p in platform.split(",")] if platform else None
-    results = db.search_chunks(con, embedding, limit=limit, platform=platforms)
+
+    cutoff_iso = None
+    if hours_back is not None:
+        cutoff_iso = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=hours_back)
+        ).isoformat()
+    elif since:
+        try:
+            dt = datetime.datetime.strptime(since, "%Y-%m-%d")
+            cutoff_iso = dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        except ValueError:
+            return json.dumps({"error": "Invalid since format. Use YYYY-MM-DD."})
+
+    results = db.search_chunks(
+        con, embedding, limit=limit, platform=platforms,
+        cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+    )
 
     if not results:
-        return json.dumps({"query": query, "count": 0, "results": []})
+        out = {"query": query, "count": 0, "results": [], **_current_datetime_json()}
+        return json.dumps(out, indent=2)
 
     output = []
     for chunk_id, distance in results:
@@ -81,7 +126,8 @@ def search_brain(
                 "similarity": round(1.0 - distance, 4),
             })
 
-    return json.dumps({"query": query, "count": len(output), "results": output}, indent=2)
+    out = {"query": query, "count": len(output), "results": output, **_current_datetime_json()}
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool()
@@ -122,10 +168,13 @@ def search_recent(
     for row in thought_rows:
         thoughts.append({"text": row[1], "created_at": row[2]})
 
-    return json.dumps(
-        {"hours": hours, "messages": messages, "thoughts": thoughts},
-        indent=2,
-    )
+    out = {
+        "hours": hours,
+        "messages": messages,
+        "thoughts": thoughts,
+        **_current_datetime_json(),
+    }
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool()
@@ -133,6 +182,9 @@ def get_context(
     topic: str,
     limit: int = 10,
     platform: str | None = None,
+    hours_back: int | None = None,
+    since: str | None = None,
+    sort_by_time: bool = False,
 ) -> str:
     """Given a topic, return a comprehensive context bundle.
 
@@ -144,12 +196,31 @@ def get_context(
         limit: Maximum results per category (default 10)
         platform: Filter by platform (chatgpt, anthropic, grok, claude_code, cursor).
             Comma-separated for multiple. Omit for all.
+        hours_back: Only include messages from the last N hours
+        since: Only include messages from this date (YYYY-MM-DD)
+        sort_by_time: If true, sort by newest first instead of relevance
     """
     con = _get_con()
     embedding = _lazy_embed(topic)
     platforms = [p.strip() for p in platform.split(",")] if platform else None
 
-    chunk_results = db.search_chunks(con, embedding, limit=limit, platform=platforms)
+    cutoff_iso = None
+    if hours_back is not None:
+        cutoff_iso = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=hours_back)
+        ).isoformat()
+    elif since:
+        try:
+            dt = datetime.datetime.strptime(since, "%Y-%m-%d")
+            cutoff_iso = dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        except ValueError:
+            return json.dumps({"error": "Invalid since format. Use YYYY-MM-DD.", **_current_datetime_json()})
+
+    chunk_results = db.search_chunks(
+        con, embedding, limit=limit, platform=platforms,
+        cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+    )
     thought_results = db.search_thoughts(con, embedding, limit=5)
 
     related_messages = []
@@ -178,12 +249,14 @@ def get_context(
                 "similarity": round(1.0 - distance, 4),
             })
 
-    return json.dumps({
+    out = {
         "topic": topic,
         "related_messages": related_messages,
         "related_thoughts": related_thoughts,
         "unique_threads": len(thread_ids),
-    }, indent=2)
+        **_current_datetime_json(),
+    }
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool()
@@ -207,12 +280,14 @@ def capture_thought(thought: str, tags: str = "") -> str:
     db.insert_thought(con, thought_id, thought, now, embedding, meta)
     con.commit()
 
-    return json.dumps({
+    out = {
         "status": "captured",
         "thought_id": thought_id,
         "created_at": now,
         "preview": thought[:200],
-    }, indent=2)
+        **_current_datetime_json(),
+    }
+    return json.dumps(out, indent=2)
 
 
 def run(db_path: Path | None = None, transport: str = "stdio", port: int = 8420):

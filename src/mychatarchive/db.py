@@ -90,8 +90,13 @@ def search_chunks(
     embedding: list[float],
     limit: int = 10,
     platform: str | list[str] | None = None,
+    cutoff_iso: str | None = None,
+    sort_by_time: bool = False,
 ):
-    return _b().search_chunks(con, embedding, limit=limit, platform=platform)
+    return _b().search_chunks(
+        con, embedding, limit=limit, platform=platform,
+        cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+    )
 
 
 def search_thoughts(con, embedding: list[float], limit: int = 10):
@@ -103,8 +108,13 @@ def fts_search(
     query: str,
     limit: int = 20,
     platform: str | list[str] | None = None,
+    cutoff_iso: str | None = None,
+    sort_by_time: bool = False,
 ):
-    return _b().fts_search(con, query, limit=limit, platform=platform)
+    return _b().fts_search(
+        con, query, limit=limit, platform=platform,
+        cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+    )
 
 
 def get_recent_chunks(

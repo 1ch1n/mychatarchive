@@ -219,38 +219,56 @@ def search_chunks(
     embedding: list[float],
     limit: int = 10,
     platform: str | list[str] | None = None,
+    cutoff_iso: str | None = None,
+    sort_by_time: bool = False,
 ):
-    fetch_limit = limit * 5 if platform else limit
+    fetch_limit = limit * 5 if (platform or cutoff_iso) else limit
     raw = con.execute(
         "SELECT chunk_id, distance FROM vec_chunks "
         "WHERE embedding MATCH ? AND k = ?",
         (serialize_f32(embedding), fetch_limit),
     ).fetchall()
 
-    if not platform:
+    if not platform and not cutoff_iso and not sort_by_time:
         return raw[:limit]
 
-    platforms = [platform] if isinstance(platform, str) else platform
-    placeholders = ",".join("?" * len(platforms))
     chunk_ids = [r[0] for r in raw]
     if not chunk_ids:
         return []
 
-    matching = {
-        row[0]
-        for row in con.execute(
-            f"""
-            SELECT c.chunk_id FROM chunks c
-            JOIN messages m ON c.message_id = m.message_id
-            WHERE c.chunk_id IN ({",".join("?" * len(chunk_ids))})
-              AND m.platform IN ({placeholders})
-            """,
-            (*chunk_ids, *platforms),
-        ).fetchall()
-    }
+    conditions = [f"c.chunk_id IN ({','.join('?' * len(chunk_ids))})"]
+    params: list = list(chunk_ids)
 
-    result = [(c, d) for c, d in raw if c in matching]
-    return result[:limit]
+    if platform:
+        platforms = [platform] if isinstance(platform, str) else platform
+        placeholders = ",".join("?" * len(platforms))
+        conditions.append(f"m.platform IN ({placeholders})")
+        params.extend(platforms)
+
+    if cutoff_iso:
+        conditions.append("c.ts_start >= ?")
+        params.append(cutoff_iso)
+
+    join_clause = " JOIN messages m ON c.message_id = m.message_id" if platform else ""
+    where_sql = " AND ".join(conditions)
+
+    matching_rows = con.execute(
+        f"""
+        SELECT c.chunk_id, c.ts_start FROM chunks c
+        {join_clause}
+        WHERE {where_sql}
+        """.replace("  ", " ").strip(),
+        params,
+    ).fetchall()
+
+    raw_by_id = {c: d for c, d in raw}
+    matched = [(r[0], r[1], raw_by_id.get(r[0], 0)) for r in matching_rows]
+
+    if sort_by_time:
+        matched.sort(key=lambda x: x[1] or "", reverse=True)
+
+    result = [(c, d) for c, ts, d in matched[:limit]]
+    return result
 
 
 def search_thoughts(con: sqlite3.Connection, embedding: list[float], limit: int = 10):
@@ -266,6 +284,8 @@ def fts_search(
     query: str,
     limit: int = 20,
     platform: str | list[str] | None = None,
+    cutoff_iso: str | None = None,
+    sort_by_time: bool = False,
 ):
     """Full-text search via FTS5."""
     sql = """
@@ -281,6 +301,11 @@ def fts_search(
         placeholders = ",".join("?" * len(platforms))
         sql += f" AND m.platform IN ({placeholders})"
         params.extend(platforms)
+    if cutoff_iso:
+        sql += " AND m.ts >= ?"
+        params.append(cutoff_iso)
+    if sort_by_time:
+        sql += " ORDER BY m.ts DESC"
     sql += " LIMIT ?"
     params.append(limit)
     return con.execute(sql, params).fetchall()
