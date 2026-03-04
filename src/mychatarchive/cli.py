@@ -265,17 +265,33 @@ def _cmd_init():
     # --- Embeddings ---
     print()
     print("EMBEDDINGS")
-    embed_options = {"1": "local"}
     current_embed = cfg["embeddings"].get("backend", "local")
     print(f"  Backend (current: {current_embed}):")
-    print("    1. local     - sentence-transformers, runs on your machine (default)")
-    print("    2. openai    - OpenAI API embeddings (coming soon)")
+    print("    1. local  - sentence-transformers, runs on your machine (default)")
+    print("    2. openai - OpenAI API (text-embedding-3-small/large, best quality)")
     print("    3. openrouter - OpenRouter API embeddings (coming soon)")
     choice = input("  Choose [1]: ").strip() or "1"
-    if choice in ("2", "3"):
-        print("    API embedding support is coming soon. Using local for now.")
-        choice = "1"
-    cfg["embeddings"]["backend"] = embed_options.get(choice, "local")
+    if choice == "1":
+        cfg["embeddings"]["backend"] = "local"
+    elif choice == "2":
+        cfg["embeddings"]["backend"] = "openai"
+        cfg["embeddings"]["model"] = "text-embedding-3-small"
+        cfg["embeddings"]["dimension"] = 1536
+        api_key = cfg["embeddings"].get("openai_api_key") or ""
+        key_input = input(
+            "  OpenAI API key (or press Enter to use OPENAI_API_KEY env later): "
+        ).strip()
+        if key_input:
+            cfg["embeddings"]["openai_api_key"] = key_input
+        model_choice = input(
+            "  Model [1=small/1536dim, 2=large/3072dim] [1]: "
+        ).strip() or "1"
+        if model_choice == "2":
+            cfg["embeddings"]["model"] = "text-embedding-3-large"
+            cfg["embeddings"]["dimension"] = 3072
+    else:
+        print("    OpenRouter coming soon. Using local.")
+        cfg["embeddings"]["backend"] = "local"
 
     # --- Transport ---
     print()
