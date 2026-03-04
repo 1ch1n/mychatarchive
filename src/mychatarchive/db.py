@@ -85,20 +85,35 @@ def insert_thought(con, thought_id: str, text: str, created_at: str,
     return _b().insert_thought(con, thought_id, text, created_at, embedding, meta)
 
 
-def search_chunks(con, embedding: list[float], limit: int = 10):
-    return _b().search_chunks(con, embedding, limit)
+def search_chunks(
+    con,
+    embedding: list[float],
+    limit: int = 10,
+    platform: str | list[str] | None = None,
+):
+    return _b().search_chunks(con, embedding, limit=limit, platform=platform)
 
 
 def search_thoughts(con, embedding: list[float], limit: int = 10):
     return _b().search_thoughts(con, embedding, limit)
 
 
-def fts_search(con, query: str, limit: int = 20):
-    return _b().fts_search(con, query, limit)
+def fts_search(
+    con,
+    query: str,
+    limit: int = 20,
+    platform: str | list[str] | None = None,
+):
+    return _b().fts_search(con, query, limit=limit, platform=platform)
 
 
-def get_recent_chunks(con, cutoff_iso: str, limit: int = 20):
-    return _b().get_recent_chunks(con, cutoff_iso, limit)
+def get_recent_chunks(
+    con,
+    cutoff_iso: str,
+    limit: int = 20,
+    platform: str | list[str] | None = None,
+):
+    return _b().get_recent_chunks(con, cutoff_iso, limit=limit, platform=platform)
 
 
 def get_recent_thoughts(con, cutoff_iso: str, limit: int = 20):

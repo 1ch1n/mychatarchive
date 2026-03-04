@@ -214,12 +214,43 @@ def insert_thought(con: sqlite3.Connection, thought_id: str, text: str,
     )
 
 
-def search_chunks(con: sqlite3.Connection, embedding: list[float], limit: int = 10):
-    return con.execute(
+def search_chunks(
+    con: sqlite3.Connection,
+    embedding: list[float],
+    limit: int = 10,
+    platform: str | list[str] | None = None,
+):
+    fetch_limit = limit * 5 if platform else limit
+    raw = con.execute(
         "SELECT chunk_id, distance FROM vec_chunks "
         "WHERE embedding MATCH ? AND k = ?",
-        (serialize_f32(embedding), limit),
+        (serialize_f32(embedding), fetch_limit),
     ).fetchall()
+
+    if not platform:
+        return raw[:limit]
+
+    platforms = [platform] if isinstance(platform, str) else platform
+    placeholders = ",".join("?" * len(platforms))
+    chunk_ids = [r[0] for r in raw]
+    if not chunk_ids:
+        return []
+
+    matching = {
+        row[0]
+        for row in con.execute(
+            f"""
+            SELECT c.chunk_id FROM chunks c
+            JOIN messages m ON c.message_id = m.message_id
+            WHERE c.chunk_id IN ({",".join("?" * len(chunk_ids))})
+              AND m.platform IN ({placeholders})
+            """,
+            (*chunk_ids, *platforms),
+        ).fetchall()
+    }
+
+    result = [(c, d) for c, d in raw if c in matching]
+    return result[:limit]
 
 
 def search_thoughts(con: sqlite3.Connection, embedding: list[float], limit: int = 10):
@@ -230,23 +261,55 @@ def search_thoughts(con: sqlite3.Connection, embedding: list[float], limit: int 
     ).fetchall()
 
 
-def fts_search(con: sqlite3.Connection, query: str, limit: int = 20):
+def fts_search(
+    con: sqlite3.Connection,
+    query: str,
+    limit: int = 20,
+    platform: str | list[str] | None = None,
+):
     """Full-text search via FTS5."""
-    return con.execute("""
+    sql = """
         SELECT d.message_id, m.text, m.canonical_thread_id, m.ts, m.role, m.title
         FROM messages_fts f
         JOIN messages_fts_docids d ON f.rowid = d.rowid
         JOIN messages m ON m.message_id = d.message_id
         WHERE messages_fts MATCH ?
-        LIMIT ?
-    """, (query, limit)).fetchall()
+    """
+    params: list = [query]
+    if platform:
+        platforms = [platform] if isinstance(platform, str) else platform
+        placeholders = ",".join("?" * len(platforms))
+        sql += f" AND m.platform IN ({placeholders})"
+        params.extend(platforms)
+    sql += " LIMIT ?"
+    params.append(limit)
+    return con.execute(sql, params).fetchall()
 
 
-def get_recent_chunks(con: sqlite3.Connection, cutoff_iso: str, limit: int = 20):
+def get_recent_chunks(
+    con: sqlite3.Connection,
+    cutoff_iso: str,
+    limit: int = 20,
+    platform: str | list[str] | None = None,
+):
+    if not platform:
+        return con.execute(
+            "SELECT chunk_id, text, canonical_thread_id, ts_start, meta "
+            "FROM chunks WHERE ts_start >= ? ORDER BY ts_start DESC LIMIT ?",
+            (cutoff_iso, limit),
+        ).fetchall()
+
+    platforms = [platform] if isinstance(platform, str) else platform
+    placeholders = ",".join("?" * len(platforms))
     return con.execute(
-        "SELECT chunk_id, text, canonical_thread_id, ts_start, meta "
-        "FROM chunks WHERE ts_start >= ? ORDER BY ts_start DESC LIMIT ?",
-        (cutoff_iso, limit),
+        f"""
+        SELECT c.chunk_id, c.text, c.canonical_thread_id, c.ts_start, c.meta
+        FROM chunks c
+        JOIN messages m ON c.message_id = m.message_id
+        WHERE c.ts_start >= ? AND m.platform IN ({placeholders})
+        ORDER BY c.ts_start DESC LIMIT ?
+        """,
+        (cutoff_iso, *platforms, limit),
     ).fetchall()
 
 

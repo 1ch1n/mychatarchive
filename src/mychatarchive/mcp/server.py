@@ -43,7 +43,11 @@ def _lazy_embed(text: str) -> list[float]:
 
 
 @mcp.tool()
-def search_brain(query: str, limit: int = 10) -> str:
+def search_brain(
+    query: str,
+    limit: int = 10,
+    platform: str | None = None,
+) -> str:
     """Semantic search across all chat history by meaning.
 
     Finds messages most similar to the query using vector embeddings.
@@ -52,10 +56,13 @@ def search_brain(query: str, limit: int = 10) -> str:
     Args:
         query: What to search for -- use natural language
         limit: Maximum number of results (default 10)
+        platform: Filter by platform (chatgpt, anthropic, grok, claude_code, cursor).
+            Omit to search all. Comma-separated for multiple: "chatgpt,anthropic,grok".
     """
     con = _get_con()
     embedding = _lazy_embed(query)
-    results = db.search_chunks(con, embedding, limit=limit)
+    platforms = [p.strip() for p in platform.split(",")] if platform else None
+    results = db.search_chunks(con, embedding, limit=limit, platform=platforms)
 
     if not results:
         return json.dumps({"query": query, "count": 0, "results": []})
@@ -78,19 +85,26 @@ def search_brain(query: str, limit: int = 10) -> str:
 
 
 @mcp.tool()
-def search_recent(hours: int = 24, limit: int = 20) -> str:
+def search_recent(
+    hours: int = 24,
+    limit: int = 20,
+    platform: str | None = None,
+) -> str:
     """Retrieve recent conversations and captured thoughts by time range.
 
     Args:
         hours: How many hours back to look (default 24)
         limit: Maximum results per category (default 20)
+        platform: Filter by platform (chatgpt, anthropic, grok, claude_code, cursor).
+            Comma-separated for multiple. Omit for all.
     """
     con = _get_con()
     cutoff = (
         datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
     ).isoformat()
+    platforms = [p.strip() for p in platform.split(",")] if platform else None
 
-    chunk_rows = db.get_recent_chunks(con, cutoff, limit)
+    chunk_rows = db.get_recent_chunks(con, cutoff, limit, platform=platforms)
     thought_rows = db.get_recent_thoughts(con, cutoff, limit)
 
     messages = []
@@ -115,7 +129,11 @@ def search_recent(hours: int = 24, limit: int = 20) -> str:
 
 
 @mcp.tool()
-def get_context(topic: str, limit: int = 10) -> str:
+def get_context(
+    topic: str,
+    limit: int = 10,
+    platform: str | None = None,
+) -> str:
     """Given a topic, return a comprehensive context bundle.
 
     Gathers related conversations, captured thoughts, and thread summaries
@@ -124,11 +142,14 @@ def get_context(topic: str, limit: int = 10) -> str:
     Args:
         topic: The topic to gather context about
         limit: Maximum results per category (default 10)
+        platform: Filter by platform (chatgpt, anthropic, grok, claude_code, cursor).
+            Comma-separated for multiple. Omit for all.
     """
     con = _get_con()
     embedding = _lazy_embed(topic)
+    platforms = [p.strip() for p in platform.split(",")] if platform else None
 
-    chunk_results = db.search_chunks(con, embedding, limit=limit)
+    chunk_results = db.search_chunks(con, embedding, limit=limit, platform=platforms)
     thought_results = db.search_thoughts(con, embedding, limit=5)
 
     related_messages = []
