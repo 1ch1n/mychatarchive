@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mychatarchive": {
+      "command": "mychatarchive",
+      "args": ["serve"]
+    }
+  }
+}

@@ -1,0 +1,719 @@
+"""Unified CLI for MyChatArchive.
+
+Commands:
+    mychatarchive init                Interactive setup (configure backends + sources)
+    mychatarchive sync                One-command import from all sources
+    mychatarchive import <file>       Import a chat export
+    mychatarchive export <output>     Export archive to JSON/CSV/SQLite
+    mychatarchive embed               Generate vector embeddings
+    mychatarchive serve               Start MCP server
+    mychatarchive search <query>      Search from the command line
+    mychatarchive info                Show archive stats
+    mychatarchive mcp-config          Print MCP configuration JSON
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from mychatarchive import __version__
+from mychatarchive.config import get_db_path
+
+
+def _add_db_arg(parser):
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help=f"Path to SQLite database (default: {get_db_path()})",
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="mychatarchive",
+        description="Local-first AI memory archive. Import, embed, search, and serve your chat history.",
+    )
+    parser.add_argument("--version", action="version", version=f"mychatarchive {__version__}")
+
+    sub = parser.add_subparsers(dest="command")
+
+    # --- init ---
+    sub.add_parser("init", help="Interactive setup - configure storage, embeddings, sources, and drop folder")
+
+    # --- sync ---
+    sync_p = sub.add_parser(
+        "sync",
+        help="One-command import: auto-discovers Claude Code + Cursor, scans drop folder, pulls named sources",
+    )
+    sync_p.add_argument("--embed", action="store_true", help="Also run embedding after sync")
+    _add_db_arg(sync_p)
+
+    # --- sources ---
+    sources_p = sub.add_parser("sources", help="Manage import sources (named paths to pull from)")
+    sources_sub = sources_p.add_subparsers(dest="sources_command")
+
+    sources_add = sources_sub.add_parser("add", help="Add a named import source")
+    sources_add.add_argument("name", help="Source name (e.g. 'nas', 'desktop', 'exports')")
+    sources_add.add_argument("path", help="Path to file or directory")
+    sources_add.add_argument("--format", default=None, help="Force format (chatgpt, anthropic, etc.)")
+    sources_add.add_argument("--account", default="main", help="Account identifier")
+
+    sources_rm = sources_sub.add_parser("remove", help="Remove a source")
+    sources_rm.add_argument("name", help="Source name to remove")
+
+    sources_sub.add_parser("list", help="List all configured sources")
+
+    sources_rename = sources_sub.add_parser("rename", help="Rename a source")
+    sources_rename.add_argument("old", help="Current name")
+    sources_rename.add_argument("new", help="New name")
+
+    # --- import ---
+    import_p = sub.add_parser(
+        "import", help="Import chat history (files, directories, sources, or 'auto')"
+    )
+    import_p.add_argument(
+        "file", type=str, nargs="?", default=None,
+        help="Path to export file/directory, or 'auto' for Claude Code/Cursor",
+    )
+    import_p.add_argument(
+        "--from", dest="source", default=None,
+        help="Import from a named source (see 'mychatarchive sources list'), or 'all'",
+    )
+    import_p.add_argument(
+        "--format",
+        choices=["chatgpt", "anthropic", "grok", "claude_code", "cursor"],
+        default=None,
+        help="Export format (auto-detected if not specified)",
+    )
+    import_p.add_argument("--account", default="main", help="Account identifier")
+    import_p.add_argument("--source-id", default=None, help="Import batch ID")
+    _add_db_arg(import_p)
+
+    # --- export ---
+    export_p = sub.add_parser(
+        "export", help="Export archive to JSON, CSV, or a standalone SQLite copy"
+    )
+    export_p.add_argument(
+        "output", type=str,
+        help="Output file path (.json, .csv, or .db/.sqlite for SQLite copy)",
+    )
+    export_p.add_argument(
+        "--format",
+        choices=["json", "csv", "sqlite"],
+        default=None,
+        help="Output format (auto-detected from extension if not specified)",
+    )
+    export_p.add_argument(
+        "--platform",
+        default=None,
+        help="Filter by platform (chatgpt, anthropic, grok, claude_code, cursor)",
+    )
+    export_p.add_argument(
+        "--include-thoughts", action="store_true",
+        help="Include captured thoughts in the export",
+    )
+    _add_db_arg(export_p)
+
+    # --- embed ---
+    embed_p = sub.add_parser("embed", help="Generate vector embeddings for all messages")
+    embed_p.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
+    embed_p.add_argument("--force", action="store_true", help="Re-embed all messages")
+    _add_db_arg(embed_p)
+
+    # --- serve ---
+    serve_p = sub.add_parser("serve", help="Start MCP server")
+    serve_p.add_argument(
+        "--transport",
+        choices=["stdio", "sse"],
+        default=None,
+        help="MCP transport (default: from config or stdio)",
+    )
+    serve_p.add_argument(
+        "--port",
+        type=int,
+        default=8420,
+        help="Port for SSE transport (default: 8420)",
+    )
+    _add_db_arg(serve_p)
+
+    # --- search ---
+    search_p = sub.add_parser("search", help="Search your archive from the command line")
+    search_p.add_argument("query", nargs="+", help="Search query")
+    search_p.add_argument("--limit", type=int, default=10, help="Max results")
+    search_p.add_argument(
+        "--mode",
+        choices=["semantic", "keyword"],
+        default="semantic",
+        help="Search mode (default: semantic)",
+    )
+    _add_db_arg(search_p)
+
+    # --- info ---
+    info_p = sub.add_parser("info", help="Show archive database stats")
+    _add_db_arg(info_p)
+
+    # --- mcp-config ---
+    mcp_p = sub.add_parser("mcp-config", help="Print MCP server configuration JSON")
+    mcp_p.add_argument(
+        "--client",
+        choices=["claude-desktop", "cursor"],
+        default="claude-desktop",
+        help="Target MCP client",
+    )
+    _add_db_arg(mcp_p)
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+
+    if args.command == "init":
+        _cmd_init()
+        return
+
+    if args.command == "sources":
+        _cmd_sources(args)
+        return
+
+    db_path = args.db or get_db_path()
+
+    if args.command == "sync":
+        _cmd_sync(args, db_path)
+    elif args.command == "import":
+        _cmd_import(args, db_path)
+    elif args.command == "export":
+        _cmd_export(args, db_path)
+    elif args.command == "embed":
+        _cmd_embed(args, db_path)
+    elif args.command == "serve":
+        _cmd_serve(args, db_path)
+    elif args.command == "search":
+        _cmd_search(args, db_path)
+    elif args.command == "info":
+        _cmd_info(db_path)
+    elif args.command == "mcp-config":
+        _cmd_mcp_config(args, db_path)
+
+
+def _cmd_init():
+    from mychatarchive.config import (
+        load_config, save_config, get_config_path,
+        ensure_drop_folder, _DEFAULT_DROP_FOLDER, _AUTO_SOURCE_DEFAULTS,
+    )
+
+    existing = load_config()
+    cfg = {
+        "storage": existing.get("storage", {}),
+        "embeddings": existing.get("embeddings", {}),
+        "transport": existing.get("transport", {}),
+        "drop_folder": existing.get("drop_folder", _DEFAULT_DROP_FOLDER),
+        "auto_sources": existing.get("auto_sources", dict(_AUTO_SOURCE_DEFAULTS)),
+        "sources": existing.get("sources", {}),
+    }
+
+    print("MyChatArchive Setup")
+    print("=" * 50)
+
+    # --- Drop folder ---
+    print()
+    print("DROP FOLDER")
+    print("  This is where you drop raw chat exports (JSON files).")
+    print("  Anything placed here gets imported on 'mychatarchive sync'.")
+    current_drop = cfg["drop_folder"]
+    drop_input = input(f"  Drop folder [{current_drop}]: ").strip()
+    if drop_input:
+        cfg["drop_folder"] = drop_input
+
+    # --- Auto-discovery ---
+    print()
+    print("AUTO-DISCOVERY")
+    print("  These tools are auto-detected from their default locations.")
+
+    for name, default in _AUTO_SOURCE_DEFAULTS.items():
+        current = cfg["auto_sources"].get(name, default)
+        label = "enabled" if current else "disabled"
+        toggle = input(f"  {name} [{label}] (y/n/Enter to keep): ").strip().lower()
+        if toggle == "y":
+            cfg["auto_sources"][name] = True
+        elif toggle == "n":
+            cfg["auto_sources"][name] = False
+
+    # --- Storage ---
+    print()
+    print("STORAGE")
+    storage_options = {"1": "sqlite"}
+    current_storage = cfg["storage"].get("backend", "sqlite")
+    print(f"  Backend (current: {current_storage}):")
+    print("    1. sqlite  - Local SQLite file (default)")
+    print("    2. postgres - PostgreSQL (coming soon)")
+    choice = input("  Choose [1]: ").strip() or "1"
+    if choice == "2":
+        print("    Postgres support is coming soon. Using sqlite for now.")
+        choice = "1"
+    cfg["storage"]["backend"] = storage_options.get(choice, "sqlite")
+
+    current_path = cfg["storage"].get("path", "~/.mychatarchive/archive.db")
+    path_input = input(f"  Database path [{current_path}]: ").strip()
+    if path_input:
+        cfg["storage"]["path"] = path_input
+    elif "path" not in cfg["storage"]:
+        cfg["storage"]["path"] = current_path
+
+    # --- Embeddings ---
+    print()
+    print("EMBEDDINGS")
+    embed_options = {"1": "local"}
+    current_embed = cfg["embeddings"].get("backend", "local")
+    print(f"  Backend (current: {current_embed}):")
+    print("    1. local     - sentence-transformers, runs on your machine (default)")
+    print("    2. openai    - OpenAI API embeddings (coming soon)")
+    print("    3. openrouter - OpenRouter API embeddings (coming soon)")
+    choice = input("  Choose [1]: ").strip() or "1"
+    if choice in ("2", "3"):
+        print("    API embedding support is coming soon. Using local for now.")
+        choice = "1"
+    cfg["embeddings"]["backend"] = embed_options.get(choice, "local")
+
+    # --- Transport ---
+    print()
+    print("MCP TRANSPORT")
+    transport_options = {"1": "stdio", "2": "sse"}
+    current_transport = cfg["transport"].get("type", "stdio")
+    print(f"  Transport (current: {current_transport}):")
+    print("    1. stdio - Local pipe, for Claude Desktop/Cursor (default)")
+    print("    2. sse   - HTTP server, for remote/mobile access")
+    choice = input("  Choose [1]: ").strip() or "1"
+    cfg["transport"]["type"] = transport_options.get(choice, "stdio")
+
+    if cfg["transport"]["type"] == "sse":
+        current_port = cfg["transport"].get("port", 8420)
+        port_input = input(f"  SSE port [{current_port}]: ").strip()
+        if port_input:
+            try:
+                cfg["transport"]["port"] = int(port_input)
+            except ValueError:
+                cfg["transport"]["port"] = current_port
+        else:
+            cfg["transport"]["port"] = current_port
+
+    # Save + create drop folder
+    print()
+    save_config(cfg)
+    drop_path = ensure_drop_folder()
+
+    print(f"Config saved to {get_config_path()}")
+    print(f"Drop folder created at {drop_path}")
+    print()
+    print("=" * 50)
+    print("You're all set! Here's your workflow:")
+    print()
+    print("  1. Drop raw exports into your drop folder:")
+    print(f"     {drop_path}")
+    print()
+    print("  2. Sync everything with one command:")
+    print("     mychatarchive sync")
+    print()
+    print("  This auto-imports from:")
+    for name, enabled in cfg["auto_sources"].items():
+        status = "ON" if enabled else "OFF"
+        print(f"     [{status}] {name}")
+    print(f"     [ON]  Drop folder ({drop_path})")
+    if cfg["sources"]:
+        for name in cfg["sources"]:
+            print(f"     [ON]  {name}")
+    print()
+    print("  3. Generate embeddings + start serving:")
+    print("     mychatarchive embed && mychatarchive serve")
+
+
+def _cmd_sync(args, db_path: Path):
+    from mychatarchive.ingest import run_all
+    run_all(db_path)
+
+    if args.embed:
+        print("\nRunning embeddings...", file=sys.stderr)
+        from mychatarchive.embeddings import run as embed_run
+        embed_run(db_path=db_path)
+
+
+def _cmd_sources(args):
+    from mychatarchive.config import get_sources, add_source, remove_source, rename_source
+
+    cmd = args.sources_command
+
+    if cmd is None:
+        _cmd_sources_list()
+        return
+
+    if cmd == "add":
+        add_source(args.name, args.path, format_name=args.format, account=args.account)
+        print(f"Source '{args.name}' added: {args.path}")
+        if args.format:
+            print(f"  Format: {args.format}")
+        print(f"  Account: {args.account}")
+        print(f"\nUse: mychatarchive import --from {args.name}")
+
+    elif cmd == "remove":
+        if remove_source(args.name):
+            print(f"Source '{args.name}' removed.")
+        else:
+            print(f"Source '{args.name}' not found.", file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "list":
+        _cmd_sources_list()
+
+    elif cmd == "rename":
+        if rename_source(args.old, args.new):
+            print(f"Source renamed: '{args.old}' -> '{args.new}'")
+        else:
+            print(
+                f"Cannot rename: '{args.old}' not found or '{args.new}' already exists.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
+def _cmd_sources_list():
+    from mychatarchive.config import get_sources, get_auto_sources, get_drop_folder
+
+    auto = get_auto_sources()
+    drop = get_drop_folder()
+    sources = get_sources()
+
+    print("All import sources (used by 'mychatarchive sync'):")
+    print(f"{'─' * 60}")
+
+    # Auto-discovery
+    print("  AUTO-DISCOVERY:")
+    for name, enabled in auto.items():
+        status = "ON " if enabled else "OFF"
+        print(f"    [{status}] {name}")
+
+    # Drop folder
+    print()
+    drop_exists = "✓" if drop.exists() else "✗"
+    file_count = len(list(drop.rglob("*"))) if drop.exists() else 0
+    importable = sum(1 for p in drop.rglob("*") if p.is_file() and p.suffix.lower() in (".json", ".jsonl")) if drop.exists() else 0
+    print(f"  DROP FOLDER:")
+    print(f"    Path:  {drop} [{drop_exists}]")
+    if drop.exists():
+        print(f"    Files: {importable} importable")
+
+    # Named sources
+    if sources:
+        print()
+        print(f"  NAMED SOURCES ({len(sources)}):")
+        for name, cfg in sources.items():
+            path = cfg.get("path", "?")
+            fmt = cfg.get("format", "auto-detect")
+            account = cfg.get("account", "main")
+            exists = "✓" if Path(path).expanduser().exists() else "✗"
+            print(f"    {name}")
+            print(f"      Path:    {path} [{exists}]")
+            print(f"      Format:  {fmt}")
+            print(f"      Account: {account}")
+
+    print(f"{'─' * 60}")
+    print(f"\nSync all:  mychatarchive sync")
+    print(f"One source: mychatarchive import --from <name>")
+    print(f"Add source: mychatarchive sources add <name> <path>")
+
+
+def _cmd_import(args, db_path: Path):
+    # --from takes priority: import from named source(s)
+    if args.source:
+        if args.source.lower() == "all":
+            from mychatarchive.ingest import run_all
+            run_all(db_path)
+        else:
+            from mychatarchive.ingest import run_source
+            run_source(args.source, db_path)
+        return
+
+    # Direct file/directory/auto path
+    file_str = args.file
+    if file_str is None:
+        print(
+            "Provide a file path, directory, or use --from <source>.\n"
+            "Examples:\n"
+            "  mychatarchive import conversations.json\n"
+            "  mychatarchive import ./exports/\n"
+            "  mychatarchive import --from nas\n"
+            "  mychatarchive import --from all\n"
+            "  mychatarchive sync               (same as --from all)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if file_str.lower() == "auto":
+        fmt = args.format
+        if fmt is None:
+            print(
+                "When using 'auto', specify --format (claude_code or cursor).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        from mychatarchive.ingest import run
+        run(
+            file_path=Path("auto"),
+            db_path=db_path,
+            format_name=fmt,
+            platform=fmt,
+            account_id=args.account,
+            source_id=args.source_id,
+        )
+        return
+
+    file_path = Path(file_str)
+    if not file_path.exists():
+        print(f"Path not found: {file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if file_path.is_dir():
+        from mychatarchive.ingest import run_directory
+        run_directory(
+            dir_path=file_path,
+            db_path=db_path,
+            format_name=args.format,
+            account_id=args.account,
+            source_id=args.source_id,
+        )
+    else:
+        from mychatarchive.ingest import run
+        run(
+            file_path=file_path,
+            db_path=db_path,
+            format_name=args.format,
+            account_id=args.account,
+            source_id=args.source_id,
+        )
+
+
+def _cmd_export(args, db_path: Path):
+    if not db_path.exists():
+        print(f"No database at {db_path}. Import chats first.", file=sys.stderr)
+        sys.exit(1)
+
+    output_path = Path(args.output)
+    fmt = args.format
+    if fmt is None:
+        ext = output_path.suffix.lower()
+        fmt_map = {".json": "json", ".csv": "csv", ".db": "sqlite", ".sqlite": "sqlite"}
+        fmt = fmt_map.get(ext)
+        if fmt is None:
+            print(
+                f"Cannot detect format from extension '{ext}'. "
+                f"Use --format (json, csv, sqlite).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    from mychatarchive import db
+
+    if fmt == "sqlite":
+        import shutil
+        shutil.copy2(str(db_path), str(output_path))
+        print(f"Database copied to {output_path}")
+        size_mb = output_path.stat().st_size / (1024 * 1024)
+        print(f"  Size: {size_mb:.1f} MB")
+        return
+
+    con = db.get_connection(db_path)
+    messages = db.export_messages(con, platform=args.platform)
+    thoughts = []
+    if args.include_thoughts:
+        thoughts = db.export_thoughts(con)
+    con.close()
+
+    if fmt == "json":
+        export_data = {"messages": messages, "count": len(messages)}
+        if thoughts:
+            export_data["thoughts"] = thoughts
+            export_data["thought_count"] = len(thoughts)
+        if args.platform:
+            export_data["platform_filter"] = args.platform
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, indent=2, ensure_ascii=False)
+
+        print(f"Exported {len(messages):,} messages to {output_path}")
+        if thoughts:
+            print(f"  + {len(thoughts):,} thoughts")
+
+    elif fmt == "csv":
+        import csv
+        with open(output_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["message_id", "thread_id", "platform", "account_id",
+                            "timestamp", "role", "content", "title", "source_id"],
+            )
+            writer.writeheader()
+            writer.writerows(messages)
+
+        print(f"Exported {len(messages):,} messages to {output_path}")
+        if thoughts and args.include_thoughts:
+            thought_path = output_path.with_name(output_path.stem + "_thoughts.csv")
+            with open(thought_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=["thought_id", "content", "created_at", "metadata"],
+                )
+                writer.writeheader()
+                writer.writerows(thoughts)
+            print(f"  + {len(thoughts):,} thoughts to {thought_path}")
+
+
+def _cmd_embed(args, db_path: Path):
+    if not db_path.exists():
+        print(f"No database found at {db_path}. Import chats first.", file=sys.stderr)
+        sys.exit(1)
+
+    from mychatarchive.embeddings import run
+    run(db_path=db_path, batch_size=args.batch_size, force=args.force)
+
+
+def _cmd_serve(args, db_path: Path):
+    if not db_path.exists():
+        print(f"No database found at {db_path}. Import and embed chats first.", file=sys.stderr)
+        sys.exit(1)
+
+    transport = args.transport
+    if transport is None:
+        from mychatarchive.backends import get_transport
+        transport = get_transport()
+
+    from mychatarchive.mcp.server import run
+    run(db_path=db_path, transport=transport, port=args.port)
+
+
+def _cmd_search(args, db_path: Path):
+    if not db_path.exists():
+        print(f"No database found at {db_path}. Import chats first.", file=sys.stderr)
+        sys.exit(1)
+
+    query = " ".join(args.query)
+    from mychatarchive import db
+
+    con = db.get_connection(db_path)
+
+    if args.mode == "semantic":
+        from mychatarchive.embeddings import embed_single
+        embedding = embed_single(query)
+        results = db.search_chunks(con, embedding, limit=args.limit)
+
+        if not results:
+            print("No results found.")
+            con.close()
+            return
+
+        for i, (chunk_id, distance) in enumerate(results, 1):
+            row = db.get_chunk_by_id(con, chunk_id)
+            if row:
+                meta = json.loads(row[4]) if row[4] else {}
+                similarity = round(1.0 - distance, 4)
+                title = meta.get("title", "Untitled")
+                role = meta.get("role", "?")
+                print(f"\n--- Result {i} (similarity: {similarity}) ---")
+                print(f"Thread: {title}")
+                print(f"Role: {role} | Time: {row[2]}")
+                print(f"{row[0][:500]}")
+    else:
+        results = db.fts_search(con, query, limit=args.limit)
+        if not results:
+            print("No results found.")
+            con.close()
+            return
+
+        for i, row in enumerate(results, 1):
+            print(f"\n--- Result {i} ---")
+            print(f"Thread: {row[5] or 'Untitled'}")
+            print(f"Role: {row[4]} | Time: {row[3]}")
+            print(f"{row[1][:500]}")
+
+    con.close()
+
+
+def _cmd_info(db_path: Path):
+    if not db_path.exists():
+        print(f"No database at {db_path}. Import chats first.", file=sys.stderr)
+        sys.exit(1)
+
+    from mychatarchive import db
+
+    try:
+        con = db.get_connection(db_path)
+    except Exception:
+        import sqlite3
+        con = sqlite3.connect(str(db_path))
+
+    msgs = db.message_count(con)
+    threads = db.thread_count(con)
+    chunks = db.chunk_count(con)
+    thoughts = db.thought_count(con)
+    try:
+        platforms = db.platform_counts(con)
+    except Exception:
+        platforms = []
+    con.close()
+
+    print(f"MyChatArchive - {db_path}")
+    print(f"{'-' * 40}")
+    print(f"  Messages:    {msgs:,}")
+    print(f"  Threads:     {threads:,}")
+    print(f"  Embedded:    {chunks:,}")
+    print(f"  Thoughts:    {thoughts:,}")
+    if platforms:
+        print(f"  Platforms:")
+        for plat, count in platforms:
+            print(f"    {plat}: {count:,}")
+
+    if chunks == 0 and msgs > 0:
+        print(f"\n  Tip: Run 'mychatarchive embed' to enable semantic search.")
+
+
+def _cmd_mcp_config(args, db_path: Path):
+    """Print the MCP configuration snippet for the requested client."""
+    import shutil
+
+    mychatarchive_path = shutil.which("mychatarchive")
+    if mychatarchive_path is None:
+        mychatarchive_path = "mychatarchive"
+
+    if args.client == "claude-desktop":
+        config = {
+            "mcpServers": {
+                "mychatarchive": {
+                    "command": mychatarchive_path,
+                    "args": ["--db", str(db_path), "serve"],
+                }
+            }
+        }
+        print("Add this to your Claude Desktop config file:")
+        if sys.platform == "win32":
+            print(r"  %APPDATA%\Claude\claude_desktop_config.json")
+        else:
+            print("  ~/Library/Application Support/Claude/claude_desktop_config.json")
+        print()
+        print(json.dumps(config, indent=2))
+
+    elif args.client == "cursor":
+        config = {
+            "mcpServers": {
+                "mychatarchive": {
+                    "command": mychatarchive_path,
+                    "args": ["--db", str(db_path), "serve"],
+                }
+            }
+        }
+        print("Add this to your Cursor MCP settings:")
+        print()
+        print(json.dumps(config, indent=2))
+
+
+if __name__ == "__main__":
+    main()
