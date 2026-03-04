@@ -148,6 +148,12 @@ def main():
         default="semantic",
         help="Search mode (default: semantic)",
     )
+    search_p.add_argument(
+        "--platform",
+        action="append",
+        metavar="PLATFORM",
+        help="Filter by platform (repeat for multiple: --platform chatgpt --platform anthropic)",
+    )
     _add_db_arg(search_p)
 
     # --- info ---
@@ -642,11 +648,12 @@ def _cmd_search(args, db_path: Path):
     from mychatarchive import db
 
     con = db.get_connection(db_path)
+    platform = args.platform if args.platform else None
 
     if args.mode == "semantic":
         from mychatarchive.embeddings import embed_single
         embedding = embed_single(query)
-        results = db.search_chunks(con, embedding, limit=args.limit)
+        results = db.search_chunks(con, embedding, limit=args.limit, platform=platform)
 
         if not results:
             print("No results found.")
@@ -665,7 +672,7 @@ def _cmd_search(args, db_path: Path):
                 print(f"Role: {role} | Time: {row[2]}")
                 print(f"{row[0][:500]}")
     else:
-        results = db.fts_search(con, query, limit=args.limit)
+        results = db.fts_search(con, query, limit=args.limit, platform=platform)
         if not results:
             print("No results found.")
             con.close()
