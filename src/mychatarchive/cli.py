@@ -6,6 +6,8 @@ Commands:
     mychatarchive import <file>       Import a chat export
     mychatarchive export <output>     Export archive to JSON/CSV/SQLite
     mychatarchive embed               Generate vector embeddings
+    mychatarchive summarize           Generate LLM summaries for all threads
+    mychatarchive groups              Manage thread groups (list/create/add/remove)
     mychatarchive serve               Start MCP server
     mychatarchive search <query>      Search from the command line
     mychatarchive info                Show archive stats
@@ -122,6 +124,81 @@ def main():
     embed_p.add_argument("--force", action="store_true", help="Re-embed all messages")
     _add_db_arg(embed_p)
 
+    # --- summarize ---
+    summarize_p = sub.add_parser(
+        "summarize",
+        help="Generate LLM thread summaries (pipeline step: after sync, before embed)",
+    )
+    summarize_p.add_argument(
+        "--model",
+        default=None,
+        metavar="MODEL",
+        help="LLM model (OpenAI-compatible name). Falls back to config.json summarize.model, then anthropic/claude-haiku-4-5.",
+    )
+    summarize_p.add_argument(
+        "--base-url",
+        default=None,
+        metavar="URL",
+        help="API base URL. Falls back to config.json summarize.base_url, then OpenRouter.",
+    )
+    summarize_p.add_argument(
+        "--key",
+        default=None,
+        metavar="APIKEY",
+        help="API key (falls back to OPENROUTER_API_KEY or ANTHROPIC_API_KEY env vars)",
+    )
+    summarize_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-summarize threads that already have summaries",
+    )
+    summarize_p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Process at most N threads (useful for testing)",
+    )
+    summarize_p.add_argument(
+        "--no-embed",
+        action="store_true",
+        help="Skip embedding the summaries (faster, but disables thread-level semantic search)",
+    )
+    _add_db_arg(summarize_p)
+
+    # --- groups ---
+    groups_p = sub.add_parser(
+        "groups",
+        help="Manage thread groups — curate which threads belong to Jarvis, Coding, Projects, etc.",
+    )
+    groups_sub = groups_p.add_subparsers(dest="groups_command")
+
+    groups_sub.add_parser("list", help="List all groups with thread counts")
+
+    groups_create = groups_sub.add_parser("create", help="Create a new group")
+    groups_create.add_argument("name", help="Group name (slug, e.g. 'jarvis', 'coding')")
+    groups_create.add_argument("--description", default=None, help="Optional description")
+
+    groups_add = groups_sub.add_parser("add", help="Add threads to a group")
+    groups_add.add_argument("group", help="Group name")
+    groups_add.add_argument(
+        "thread_ids",
+        nargs="+",
+        metavar="THREAD_ID",
+        help="canonical_thread_id(s) to add (use 'mychatarchive groups show <group>' to find IDs)",
+    )
+
+    groups_remove = groups_sub.add_parser("remove", help="Remove threads from a group")
+    groups_remove.add_argument("group", help="Group name")
+    groups_remove.add_argument("thread_ids", nargs="+", metavar="THREAD_ID")
+
+    groups_delete = groups_sub.add_parser("delete", help="Delete a group (threads are not deleted)")
+    groups_delete.add_argument("name", help="Group name to delete")
+
+    groups_show = groups_sub.add_parser("show", help="Show threads in a group")
+    groups_show.add_argument("name", help="Group name")
+    groups_show.add_argument("--limit", type=int, default=50, help="Max threads to show")
+
     # --- serve ---
     serve_p = sub.add_parser("serve", help="Start MCP server")
     serve_p.add_argument(
@@ -173,6 +250,12 @@ def main():
         default="relevance",
         help="Sort results by relevance (default) or time (newest first)",
     )
+    search_p.add_argument(
+        "--group",
+        default=None,
+        metavar="GROUP",
+        help="Filter to threads in this group (see 'mychatarchive groups list')",
+    )
     _add_db_arg(search_p)
 
     # --- info ---
@@ -213,6 +296,10 @@ def main():
         _cmd_export(args, db_path)
     elif args.command == "embed":
         _cmd_embed(args, db_path)
+    elif args.command == "summarize":
+        _cmd_summarize(args, db_path)
+    elif args.command == "groups":
+        _cmd_groups(args, db_path)
     elif args.command == "serve":
         _cmd_serve(args, db_path)
     elif args.command == "search":
@@ -644,6 +731,182 @@ def _cmd_embed(args, db_path: Path):
     run(db_path=db_path, batch_size=args.batch_size, force=args.force)
 
 
+def _cmd_summarize(args, db_path: Path):
+    if not db_path.exists():
+        print(f"No database found at {db_path}. Import chats first.", file=sys.stderr)
+        sys.exit(1)
+
+    from mychatarchive.config import load_config
+    from mychatarchive.summarizer import run as summarize_run, _DEFAULT_MODEL, _DEFAULT_BASE_URL
+
+    summarize_cfg = load_config().get("summarize", {})
+    model = args.model or summarize_cfg.get("model") or _DEFAULT_MODEL
+    base_url = args.base_url or summarize_cfg.get("base_url") or _DEFAULT_BASE_URL
+
+    print(f"Generating thread summaries...", file=sys.stderr)
+    print(f"  Model:    {model}", file=sys.stderr)
+    print(f"  Base URL: {base_url}", file=sys.stderr)
+    if args.limit:
+        print(f"  Limit:    {args.limit} threads", file=sys.stderr)
+
+    try:
+        stats = summarize_run(
+            db_path=db_path,
+            model=model,
+            base_url=base_url,
+            api_key=args.key or "",
+            force=args.force,
+            limit=args.limit,
+            embed_summaries=not args.no_embed,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print()
+    print(f"Summarization complete:")
+    print(f"  Processed: {stats['processed']:,}")
+    print(f"  Skipped:   {stats['skipped']:,} (already summarized)")
+    print(f"  Errors:    {stats['errors']}")
+    if stats["processed"] > 0:
+        print()
+        print("Next steps:")
+        print("  mychatarchive embed          # embed messages for chunk-level search")
+        print("  mychatarchive groups create <name>  # organize threads into groups")
+
+
+def _cmd_groups(args, db_path: Path):
+    if not db_path.exists():
+        print(f"No database found at {db_path}. Import chats first.", file=sys.stderr)
+        sys.exit(1)
+
+    cmd = getattr(args, "groups_command", None)
+    if cmd is None:
+        _cmd_groups_list(db_path)
+        return
+
+    if cmd == "list":
+        _cmd_groups_list(db_path)
+
+    elif cmd == "create":
+        import datetime as dt
+        import hashlib
+        from mychatarchive import db
+        con = db.get_connection(db_path)
+        db.ensure_schema(con)
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        group_id = hashlib.sha1(args.name.encode()).hexdigest()[:12]
+        ok = db.create_group(con, group_id, args.name, args.description, now)
+        con.close()
+        if ok:
+            print(f"Group '{args.name}' created (id: {group_id})")
+        else:
+            print(f"Group '{args.name}' already exists.", file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "add":
+        import datetime as dt
+        from mychatarchive import db
+        con = db.get_connection(db_path)
+        db.ensure_schema(con)
+        group_row = db.get_group_by_name(con, args.group)
+        if not group_row:
+            print(f"Group '{args.group}' not found. Create it first:", file=sys.stderr)
+            print(f"  mychatarchive groups create {args.group}", file=sys.stderr)
+            sys.exit(1)
+        group_id = group_row[0]
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        added = 0
+        for tid in args.thread_ids:
+            if db.add_to_group(con, tid, group_id, now):
+                added += 1
+        con.commit()
+        con.close()
+        print(f"Added {added}/{len(args.thread_ids)} thread(s) to '{args.group}'.")
+
+    elif cmd == "remove":
+        from mychatarchive import db
+        con = db.get_connection(db_path)
+        group_row = db.get_group_by_name(con, args.group)
+        if not group_row:
+            print(f"Group '{args.group}' not found.", file=sys.stderr)
+            sys.exit(1)
+        group_id = group_row[0]
+        removed = 0
+        for tid in args.thread_ids:
+            if db.remove_from_group(con, tid, group_id):
+                removed += 1
+        con.commit()
+        con.close()
+        print(f"Removed {removed}/{len(args.thread_ids)} thread(s) from '{args.group}'.")
+
+    elif cmd == "delete":
+        from mychatarchive import db
+        con = db.get_connection(db_path)
+        group_row = db.get_group_by_name(con, args.name)
+        if not group_row:
+            print(f"Group '{args.name}' not found.", file=sys.stderr)
+            sys.exit(1)
+        group_id = group_row[0]
+        db.delete_group(con, group_id)
+        con.close()
+        print(f"Group '{args.name}' deleted.")
+
+    elif cmd == "show":
+        from mychatarchive import db
+        con = db.get_connection(db_path)
+        group_row = db.get_group_by_name(con, args.name)
+        if not group_row:
+            print(f"Group '{args.name}' not found.", file=sys.stderr)
+            sys.exit(1)
+        group_id = group_row[0]
+        threads = db.get_threads_in_group(con, group_id)
+        con.close()
+
+        if not threads:
+            print(f"Group '{args.name}' has no threads yet.")
+            print(f"  mychatarchive groups add {args.name} <thread_id> ...")
+            return
+
+        print(f"Group: {args.name} ({len(threads)} threads)")
+        print(f"{'─' * 60}")
+        for t in threads[: args.limit]:
+            title = (t["title"] or "Untitled")[:50]
+            ts = (t["ts_start"] or "")[:10]
+            msgs = t["message_count"]
+            plat = t["platform"] or "?"
+            print(f"  [{plat}] {ts}  {title}  ({msgs} msgs)")
+            print(f"    {t['canonical_thread_id']}")
+
+
+def _cmd_groups_list(db_path: Path):
+    from mychatarchive import db
+    con = db.get_connection(db_path)
+    db.ensure_schema(con)
+    groups = db.list_groups(con)
+    con.close()
+
+    if not groups:
+        print("No groups yet.")
+        print()
+        print("Create your first group:")
+        print("  mychatarchive groups create jarvis --description 'Daily personal chats'")
+        print("  mychatarchive groups create coding --description 'Dev work and technical threads'")
+        return
+
+    print(f"Thread Groups ({len(groups)}):")
+    print(f"{'─' * 60}")
+    for group_id, name, description, created_at, member_count in groups:
+        desc = f" — {description}" if description else ""
+        print(f"  {name}{desc}  [{member_count} threads]")
+        print(f"    id: {group_id}")
+    print()
+    print("Commands:")
+    print("  mychatarchive groups show <name>         list threads in a group")
+    print("  mychatarchive groups add <name> <id...>  add threads to a group")
+    print("  mychatarchive search 'query' --group <name>  search within a group")
+
+
 def _cmd_serve(args, db_path: Path):
     if not db_path.exists():
         print(f"No database found at {db_path}. Import and embed chats first.", file=sys.stderr)
@@ -685,12 +948,28 @@ def _cmd_search(args, db_path: Path):
             print(f"Invalid --since format. Use YYYY-MM-DD.", file=sys.stderr)
             sys.exit(1)
 
+    # Resolve group filter to a set of thread IDs
+    group_thread_ids = None
+    if hasattr(args, "group") and args.group:
+        group_row = db.get_group_by_name(con, args.group)
+        if not group_row:
+            print(f"Group '{args.group}' not found. Use 'mychatarchive groups list'.",
+                  file=sys.stderr)
+            sys.exit(1)
+        group_thread_ids = db.get_group_thread_ids(con, group_row[0])
+        if not group_thread_ids:
+            print(f"Group '{args.group}' has no threads. Add some first:")
+            print(f"  mychatarchive groups add {args.group} <thread_id>")
+            con.close()
+            return
+
     if args.mode == "semantic":
         from mychatarchive.embeddings import embed_single
         embedding = embed_single(query)
         results = db.search_chunks(
             con, embedding, limit=args.limit, platform=platform,
             cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+            group_thread_ids=group_thread_ids,
         )
 
         if not results:
@@ -713,6 +992,7 @@ def _cmd_search(args, db_path: Path):
         results = db.fts_search(
             con, query, limit=args.limit, platform=platform,
             cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+            group_thread_ids=group_thread_ids,
         )
         if not results:
             print("No results found.")
@@ -745,6 +1025,8 @@ def _cmd_info(db_path: Path):
     threads = db.thread_count(con)
     chunks = db.chunk_count(con)
     thoughts = db.thought_count(con)
+    summaries = db.summary_count(con)
+    groups = db.group_count(con)
     try:
         platforms = db.platform_counts(con)
     except Exception:
@@ -755,8 +1037,10 @@ def _cmd_info(db_path: Path):
     print(f"{'-' * 40}")
     print(f"  Messages:    {msgs:,}")
     print(f"  Threads:     {threads:,}")
-    print(f"  Embedded:    {chunks:,}")
+    print(f"  Summaries:   {summaries:,}")
+    print(f"  Embedded:    {chunks:,} chunks")
     print(f"  Thoughts:    {thoughts:,}")
+    print(f"  Groups:      {groups:,}")
     if platforms:
         print(f"  Platforms:")
         for plat, count in platforms:
@@ -764,6 +1048,9 @@ def _cmd_info(db_path: Path):
 
     if chunks == 0 and msgs > 0:
         print(f"\n  Tip: Run 'mychatarchive embed' to enable semantic search.")
+    if summaries == 0 and threads > 0:
+        print(f"  Tip: Run 'mychatarchive summarize' to generate thread summaries"
+              f" (enables groups + profile tool).")
 
 
 def _cmd_mcp_config(args, db_path: Path):

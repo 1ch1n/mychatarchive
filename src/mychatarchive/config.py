@@ -12,6 +12,11 @@ Example config.json:
   "auto_sources": {"claude_code": true, "cursor": true},
   "sources": {
     "nas": {"path": "//server.local/share/exports", "format": "chatgpt"}
+  },
+  "summarize": {
+    "api_key": "sk-or-...",
+    "model": "anthropic/claude-haiku-4-5",
+    "base_url": "https://openrouter.ai/api/v1"
   }
 }
 """
