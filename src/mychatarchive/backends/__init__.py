@@ -44,10 +44,12 @@ def get_embedder():
 
     if backend == "local":
         from mychatarchive.backends.embeddings import local as mod
+    elif backend == "openai":
+        from mychatarchive.backends.embeddings import openai as mod
     else:
         raise ValueError(
             f"Unknown embedder backend: '{backend}'. "
-            f"Available: local. "
+            f"Available: local, openai. "
             f"Run 'mychatarchive init' to configure."
         )
 
