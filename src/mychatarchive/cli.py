@@ -154,6 +154,25 @@ def main():
         metavar="PLATFORM",
         help="Filter by platform (repeat for multiple: --platform chatgpt --platform anthropic)",
     )
+    search_p.add_argument(
+        "--hours",
+        type=int,
+        default=None,
+        help="Only include messages from the last N hours",
+    )
+    search_p.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Only include messages from this date onward",
+    )
+    search_p.add_argument(
+        "--sort",
+        choices=["relevance", "time"],
+        default="relevance",
+        help="Sort results by relevance (default) or time (newest first)",
+    )
     _add_db_arg(search_p)
 
     # --- info ---
@@ -646,14 +665,33 @@ def _cmd_search(args, db_path: Path):
 
     query = " ".join(args.query)
     from mychatarchive import db
+    import datetime
 
     con = db.get_connection(db_path)
     platform = args.platform if args.platform else None
+    sort_by_time = args.sort == "time"
+
+    cutoff_iso = None
+    if args.hours is not None:
+        cutoff_iso = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=args.hours)
+        ).isoformat()
+    elif args.since:
+        try:
+            dt = datetime.datetime.strptime(args.since, "%Y-%m-%d")
+            cutoff_iso = dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        except ValueError:
+            print(f"Invalid --since format. Use YYYY-MM-DD.", file=sys.stderr)
+            sys.exit(1)
 
     if args.mode == "semantic":
         from mychatarchive.embeddings import embed_single
         embedding = embed_single(query)
-        results = db.search_chunks(con, embedding, limit=args.limit, platform=platform)
+        results = db.search_chunks(
+            con, embedding, limit=args.limit, platform=platform,
+            cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+        )
 
         if not results:
             print("No results found.")
@@ -672,7 +710,10 @@ def _cmd_search(args, db_path: Path):
                 print(f"Role: {role} | Time: {row[2]}")
                 print(f"{row[0][:500]}")
     else:
-        results = db.fts_search(con, query, limit=args.limit, platform=platform)
+        results = db.fts_search(
+            con, query, limit=args.limit, platform=platform,
+            cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
+        )
         if not results:
             print("No results found.")
             con.close()
