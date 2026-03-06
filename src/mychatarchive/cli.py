@@ -417,7 +417,7 @@ def _cmd_init():
     print()
     print("CHUNKING")
     print("  Long messages are split into overlapping chunks for better semantic search.")
-    print("  1 200 chars ≈ 300 tokens — fits local models and OpenAI's limits.")
+    print("  1,200 chars ~ 300 tokens - fits local models and OpenAI's limits.")
     current_chunk_size = cfg["embeddings"].get("chunk_size", _DEFAULT_CHUNK_SIZE)
     cs_input = input(f"  Chunk size in chars [{current_chunk_size}]: ").strip()
     if cs_input:

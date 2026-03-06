@@ -15,8 +15,8 @@ A personal AI memory system that compounds from daily usage. Start with searchab
 - [x] Local vector embeddings (sentence-transformers, all-MiniLM-L6-v2)
 - [x] sqlite-vec for vector storage (single file, no external services)
 - [x] FTS5 keyword search
-- [x] MCP server: search_brain, search_recent, get_context, capture_thought
-- [x] CLI: init, import, export, embed, serve, search, info, mcp-config
+- [x] MCP server: search_brain, search_recent, get_context, capture_thought, get_profile, get_current_datetime
+- [x] CLI: init, import, export, embed, serve, search, info, mcp-config, summarize, groups, sources, sync --embed
 - [x] Named import sources (`mychatarchive sources add/list/remove/rename`)
 - [x] Batch/folder import (`mychatarchive import ./folder/` recursive scan)
 - [x] `--from` flag to pull from configured sources (`--from nas`, `--from all`)
@@ -34,8 +34,8 @@ A personal AI memory system that compounds from daily usage. Start with searchab
 **Goal:** Use MyChatArchive daily across all devices -- desktop, laptop, phone -- without friction.
 
 ### Local MCP (stdio)
-- [ ] Connect MCP to Claude Desktop (desktop)
-- [ ] Connect MCP to Cursor (coding)
+- [x] Connect MCP to Claude Desktop (desktop)
+- [x] Connect MCP to Cursor (coding)
 - [x] Weekly re-import workflow (`mychatarchive sync --embed` -- drop exports in folder, run one command)
 
 ### Remote MCP (SSE/HTTP)
