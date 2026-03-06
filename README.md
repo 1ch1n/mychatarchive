@@ -1,14 +1,52 @@
-# MyChatArchive
+<div align="center">
+  <a href="https://mychatarchive.com">
+    <img src="assets/logo.png" alt="MyChatArchive" width="400">
+  </a>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+  <p><strong>Your AI conversation history, locally searchable by meaning.</strong></p>
 
-**Your AI conversation history, locally searchable by meaning.**
+  <p>
+    <a href="https://www.gnu.org/licenses/agpl-3.0">
+      <img alt="License: AGPL-3.0" src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg">
+    </a>
+    <a href="https://www.python.org/downloads/">
+      <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10+-blue.svg">
+    </a>
+    <a href="https://github.com/astral-sh/ruff">
+      <img alt="Code style: ruff" src="https://img.shields.io/badge/code%20style-ruff-000000.svg">
+    </a>
+    <a href="https://github.com/1ch1n/mychatarchive/stargazers">
+      <img alt="GitHub stars" src="https://img.shields.io/github/stars/1ch1n/mychatarchive?style=social">
+    </a>
+  </p>
 
-MyChatArchive imports your chat exports from ChatGPT, Claude, Grok, Claude Code, and Cursor, generates vector embeddings locally with sentence-transformers, and exposes everything via an MCP server that any AI tool can query.
+  <p>
+    <a href="https://github.com/1ch1n/mychatarchive/issues">
+      <img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
+    </a>
+    <a href="https://github.com/1ch1n/mychatarchive">
+      <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg">
+    </a>
+    <a href="https://mychatarchive.com">
+      <img alt="Website" src="https://img.shields.io/badge/web-mychatarchive.com-blue">
+    </a>
+  </p>
 
-**Open core:** The local pipeline (import, embed, summarize, search, MCP server) is free and MIT-licensed. Cloud sync and hosted MCP are on the roadmap at [mychatarchive.com](https://mychatarchive.com).
+  <h4>
+    <a href="#quick-start">Quick Start</a> &nbsp;·&nbsp;
+    <a href="#what-you-get">MCP Tools</a> &nbsp;·&nbsp;
+    <a href="#the-pipeline">Pipeline</a> &nbsp;·&nbsp;
+    <a href="#connecting-to-ai-tools">Connect</a> &nbsp;·&nbsp;
+    <a href="ROADMAP.md">Roadmap</a> &nbsp;·&nbsp;
+    <a href="https://mychatarchive.com">Website</a>
+  </h4>
+</div>
+
+---
+
+Import your chat exports from ChatGPT, Claude, Grok, Claude Code, and Cursor. Generate vector embeddings locally with sentence-transformers. Expose everything via an MCP server that any AI tool can query.
+
+> **Open core:** The local pipeline (import, embed, summarize, search, MCP server) is free and AGPL-licensed. Cloud sync and hosted MCP are on the roadmap at [mychatarchive.com](https://mychatarchive.com).
 
 ---
 
@@ -16,10 +54,12 @@ MyChatArchive imports your chat exports from ChatGPT, Claude, Grok, Claude Code,
 
 **Import your actual history.** AnythingLLM, Mem0, and Supermemory all let you add new memories going forward. None of them let you bulk-import your existing ChatGPT, Claude, or Grok exports. That archive is already yours -- this tool makes it searchable.
 
-- **Lossless.** Full message transcripts, not extracted summaries. You can always search the original.
-- **Local-first.** Single SQLite file. Embeddings run on your machine. Core needs no API keys.
-- **Developer-native.** Auto-discovers Claude Code sessions and Cursor conversations from your local machine on day one.
-- **MCP server.** Claude Desktop, Cursor, Claude Code, and any MCP client can search your archive.
+| | |
+|---|---|
+| **Lossless** | Full message transcripts, not extracted summaries. You can always search the original. |
+| **Local-first** | Single SQLite file. Embeddings run on your machine. Core needs no API keys. |
+| **Developer-native** | Auto-discovers Claude Code sessions and Cursor conversations from your local machine on day one. |
+| **MCP server** | Claude Desktop, Cursor, Claude Code, and any MCP client can search your archive. |
 
 ---
 
@@ -420,17 +460,27 @@ See [ROADMAP.md](ROADMAP.md) for the full phased plan.
 
 | | Tier |
 |-|------|
-| Import, embed, summarize, groups, MCP server (stdio) | Free / local (MIT) |
+| Import, embed, summarize, groups, MCP server (stdio) | Free / local (AGPL-3.0) |
 | SSE transport with auth, cloud sync, hosted MCP, teams | Planned at [mychatarchive.com](https://mychatarchive.com) |
 
 The principle: anything that runs on your machine is free. Anything that requires infrastructure is paid.
+
+**Licensing:** Local and self-hosted use is free under AGPL-3.0. Commercial use or offering MyChatArchive as a hosted service requires a commercial license. Contact [channing@mychatarchive.com](mailto:channing@mychatarchive.com) for commercial licensing.
 
 ---
 
 ## License
 
-MIT -- see [LICENSE](LICENSE).
+AGPL-3.0 -- see [LICENSE](LICENSE).
 
 ---
 
-**Built by [Channing Chasko](https://github.com/1ch1n)** · [mychatarchive.com](https://mychatarchive.com)
+<div align="center">
+  <strong>Built by <a href="https://github.com/1ch1n">Channing Chasko</a></strong>
+  <br>
+  <a href="https://mychatarchive.com">mychatarchive.com</a>
+  <br><br>
+  <a href="https://github.com/1ch1n/mychatarchive/stargazers">
+    <img src="https://img.shields.io/github/stars/1ch1n/mychatarchive?style=social" alt="Star on GitHub">
+  </a>
+</div>
