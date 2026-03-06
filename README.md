@@ -3,6 +3,8 @@
     <img src="assets/logo.png" alt="MyChatArchive" width="200">
   </a>
 
+  <h1>MyChatArchive</h1>
+
   <p><strong>Your AI conversation history, locally searchable by meaning.</strong></p>
 
   <p>
