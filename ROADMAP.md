@@ -115,4 +115,4 @@ A personal AI memory system that compounds from daily usage. Start with searchab
 2. **Single file** -- one SQLite DB, portable, backup-friendly
 3. **Plug and play** -- pip install, three commands, done
 4. **Compound from usage** -- the more you use AI, the smarter the archive gets
-5. **Open source** -- MIT, anyone can build on it
+5. **Open source** -- AGPL-3.0, anyone can build on it
