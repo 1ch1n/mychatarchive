@@ -52,7 +52,7 @@ Import your chat exports from ChatGPT, Claude, Grok, Claude Code, and Cursor. Ge
 
 ## Why MyChatArchive
 
-**Import your actual history.** AnythingLLM, Mem0, and Supermemory all let you add new memories going forward. None of them let you bulk-import your existing ChatGPT, Claude, or Grok exports. That archive is already yours -- this tool makes it searchable.
+**Your archive, searchable.** Drop your ChatGPT, Claude, or Grok exports into the import folder—or let MyChatArchive auto-discover Claude Code and Cursor sessions from your machine. Full transcripts, local embeddings, MCP server. No cloud required.
 
 | | |
 |---|---|
