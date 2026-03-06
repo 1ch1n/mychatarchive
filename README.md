@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://mychatarchive.com">
-    <img src="assets/logo.png" alt="MyChatArchive" width="400">
+    <img src="assets/logo.png" alt="MyChatArchive" width="200">
   </a>
 
   <p><strong>Your AI conversation history, locally searchable by meaning.</strong></p>
@@ -52,7 +52,7 @@ Import your chat exports from ChatGPT, Claude, Grok, Claude Code, and Cursor. Ge
 
 ## Why MyChatArchive
 
-**Your archive, searchable.** Drop your ChatGPT, Claude, or Grok exports into the import folder—or let MyChatArchive auto-discover Claude Code and Cursor sessions from your machine. Full transcripts, local embeddings, MCP server. No cloud required.
+**Your archive, searchable.** Drop your ChatGPT, Claude, or Grok exports into the import folder, or let MyChatArchive auto-discover Claude Code and Cursor sessions from your machine. Full transcripts, local embeddings, MCP server. No cloud required.
 
 | | |
 |---|---|
