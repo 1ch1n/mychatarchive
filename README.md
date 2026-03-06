@@ -381,6 +381,7 @@ mychatarchive/
 |   +-- config.py           # Paths, constants, config management
 |   +-- db.py               # Data access layer (delegates to backends)
 |   +-- embeddings.py       # Local embedding pipeline
+|   +-- chunker.py          # Message chunking for embeddings
 |   +-- ingest.py           # Import engine with SHA1 dedup
 |   +-- summarizer.py       # LLM thread summarization pipeline
 |   +-- parsers/
