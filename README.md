@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://mychatarchive.com">
-    <img src="assets/logo.png" alt="MyChatArchive" width="200">
+    <img src="assets/mychatarchive-book-logo.png" alt="MyChatArchive" width="200">
   </a>
 
   <h1>MyChatArchive</h1>
