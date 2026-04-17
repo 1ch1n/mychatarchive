@@ -30,6 +30,13 @@ def test_schema_creation(test_db):
     assert "messages" in tables
     assert "chunks" in tables
     assert "thoughts" in tables
+    cols = {
+        row[1]
+        for row in con.execute("PRAGMA table_info(messages)").fetchall()
+    }
+    assert "meta" in cols
+    assert "source_thread_id" in cols
+    assert "source_message_id" in cols
 
 
 def test_insert_message(test_db):
@@ -37,9 +44,19 @@ def test_insert_message(test_db):
     result = db.insert_message(
         con, "msg1", "thread1", "chatgpt", "main",
         "2026-01-01T00:00:00Z", "user", "Hello world", "Test", "src1",
+        "conv-123", "msg-upstream-1",
+        {"itir": {"tokenizer_profile_receipt": {"profile_id": "abc"}}},
     )
     assert result is True
     assert db.message_count(con) == 1
+    stored = con.execute(
+        "SELECT source_thread_id, source_message_id, meta FROM messages WHERE message_id = ?",
+        ("msg1",),
+    ).fetchone()
+    assert stored[0] == "conv-123"
+    assert stored[1] == "msg-upstream-1"
+    assert stored[2] is not None
+    assert "profile_id" in stored[2]
 
     dupe = db.insert_message(
         con, "msg1", "thread1", "chatgpt", "main",

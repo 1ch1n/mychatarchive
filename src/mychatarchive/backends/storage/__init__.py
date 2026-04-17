@@ -25,6 +25,9 @@ class StorageBackend(Protocol):
         self, con, message_id: str, canonical_thread_id: str,
         platform: str, account_id: str, ts: str, role: str,
         text: str, title: str, source_id: str,
+        source_thread_id: Optional[str] = None,
+        source_message_id: Optional[str] = None,
+        meta: Optional[dict] = None,
     ) -> bool: ...
 
     # Counts

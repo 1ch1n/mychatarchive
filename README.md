@@ -158,6 +158,36 @@ mychatarchive serve
 
 The pipeline is incremental. Re-run `sync` any time -- SHA1 dedup means it's always safe. New messages get embedded on the next `embed` run without `--force`.
 
+### Required ITIR Enrichment
+
+MyChatArchive now expects a local `SensibLaw` checkout and attaches normalized
+token, structure, and relation metadata to every imported message. Ingest fails
+fast if that local shared-reducer surface is unavailable.
+
+Point the importer at one or more local checkouts in priority order:
+
+```bash
+export MYCHATARCHIVE_ITIR_PATHS="/path/to/SensibLaw:/path/to/fallback/SensibLaw"
+mychatarchive sync
+```
+
+You can also set the same paths in `~/.mychatarchive/config.json`:
+
+```json
+{
+  "itir": {
+    "paths": [
+      "/path/to/newer/SensibLaw",
+      "/path/to/fallback/SensibLaw"
+    ]
+  }
+}
+```
+
+If you keep multiple local checkouts, list the preferred one first. Existing
+canonical thread/message IDs remain stable; the extra metadata is additive and
+stored in the message `meta` field.
+
 ---
 
 ## Sync
@@ -171,9 +201,34 @@ mychatarchive sync --embed   # sync + generate embeddings in one shot
 
 1. **Auto-discovery** -- Claude Code sessions (`~/.claude/projects/`) and Cursor conversations from local databases. Enabled by default, toggleable in `init`.
 2. **Drop folder** -- anything in `~/.mychatarchive/imports/`. Drop your ChatGPT, Claude, or Grok export JSON here; format is auto-detected. Subdirectories scanned recursively.
-3. **Named sources** -- custom paths or NAS shares you've configured with `mychatarchive sources add`.
+3. **Named sources** -- path sources via `mychatarchive sources add`, plus live ChatGPT-backed sources via `mychatarchive sources add-live`.
 
 All three deduplicate into the same archive via SHA1 hashing.
+
+### Live Sources
+
+Configure a live source when you want `sync` or `import --from` to pull a
+conversation directly from ChatGPT using a DB-first selector policy and a live
+fallback only when the archive cannot disambiguate the selector.
+
+```bash
+mychatarchive sources add-live project-chat "Project chat"
+mychatarchive sources add-live product-thread "https://chatgpt.com/c/1234..." --title "Product thread"
+mychatarchive import --from project-chat
+```
+
+Live sources preserve upstream `source_thread_id` and `source_message_id`
+provenance in the archive.
+
+### NotebookLM
+
+The sibling `../notebooklm-pack` workflow is exposed directly:
+
+```bash
+mychatarchive notebooklm pack ../_repo_readmes /tmp/mca-pack
+mychatarchive notebooklm ingest --manifest /tmp/mca-pack/manifest.json --notebook-url https://notebooklm.google.com/notebook/NOTEBOOK_ID --output /tmp/mca-ingest.json
+mychatarchive notebooklm pack-ingest ../_repo_readmes /tmp/mca-pack --notebook-title "MyChatArchive Context" --output /tmp/mca-ingest.json
+```
 
 > **Note:** Auto-discovery covers Claude Code (the terminal agent) and Cursor. Claude web, mobile, and desktop app conversations require a manual export from Anthropic's settings -- drop the file in your imports folder and run `sync`.
 
@@ -352,9 +407,13 @@ Named sources (NAS, custom paths)     --+              |
 | `mychatarchive import <file\|dir>` | Import a single file or directory |
 | `mychatarchive import --from <name>` | Import from a named source |
 | `mychatarchive sources add <name> <path>` | Add a named import source |
+| `mychatarchive sources add-live <name> <selector>` | Add a named live source |
 | `mychatarchive sources list` | Show all sources (auto + drop + named) |
 | `mychatarchive sources remove <name>` | Remove a source |
 | `mychatarchive sources rename <old> <new>` | Rename a source |
+| `mychatarchive notebooklm pack ...` | Run sibling `notebooklm-pack` |
+| `mychatarchive notebooklm ingest ...` | Upload a `manifest.json` to NotebookLM |
+| `mychatarchive notebooklm pack-ingest ...` | Pack then upload in one command |
 | `mychatarchive summarize` | Generate LLM thread summaries (needs API key) |
 | `mychatarchive groups list` | List all thread groups |
 | `mychatarchive groups create <name>` | Create a thread group |

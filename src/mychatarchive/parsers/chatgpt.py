@@ -57,6 +57,7 @@ def _parse_conversation(convo: dict) -> Iterator[dict]:
             "role": role,
             "content": content,
             "created_at": float(ts),
+            "source_message_id": m.get("id") or node_id,
         })
 
     messages.sort(key=lambda x: x["created_at"])
