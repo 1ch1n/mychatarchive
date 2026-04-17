@@ -9,6 +9,8 @@ from pathlib import Path
 from tqdm import tqdm
 
 from mychatarchive import db
+from mychatarchive.itir import enrich_text as enrich_text_with_itir
+from mychatarchive.live import choose_live_selector, fetch_live_messages
 from mychatarchive.parsers import parse, detect_format
 
 IMPORTABLE_EXTENSIONS = {".json", ".jsonl"}
@@ -46,6 +48,121 @@ def round_epoch(ts) -> int | None:
         return None
 
 
+def _build_message_meta(content: str | None) -> dict | None:
+    if not content or not content.strip():
+        return None
+    itir_payload = enrich_text_with_itir(content)
+    return {"itir": itir_payload}
+
+
+def _canonical_thread_id_for_messages(
+    thread_messages: list[dict],
+    *,
+    platform: str,
+    account_id: str,
+) -> str:
+    first = thread_messages[0]
+    thread_source_id = str(first.get("thread_id") or "").strip()
+    if thread_source_id:
+        return sha1("|".join([platform, account_id, "source_thread_id", thread_source_id]))
+
+    first_snip = (first["content"] or "")[:256]
+    return sha1("|".join([
+        platform,
+        account_id,
+        norm_text(first["thread_title"]),
+        str(round_epoch(first["created_at"]) or ""),
+        first["role"] or "",
+        norm_text(first_snip),
+    ]))
+
+
+def _message_id_for_message(
+    msg: dict,
+    *,
+    platform: str,
+    account_id: str,
+    canonical_thread_id: str,
+) -> str:
+    source_message_id = str(msg.get("source_message_id") or "").strip()
+    if source_message_id:
+        return sha1("|".join([
+            platform, account_id, canonical_thread_id, "source_message_id", source_message_id,
+        ]))
+
+    ts_round = round_epoch(msg["created_at"]) or 0
+    return sha1("|".join([
+        platform, account_id, canonical_thread_id, msg["role"] or "",
+        str(ts_round), norm_text(msg["content"] or ""),
+    ]))
+
+
+def ingest_parsed_messages(
+    messages: list[dict],
+    *,
+    db_path: Path,
+    platform: str,
+    account_id: str = "main",
+    source_id: str,
+):
+    """Insert already-parsed messages while preserving upstream provenance."""
+    con = db.get_connection(db_path)
+    db.ensure_schema(con)
+
+    if not messages:
+        con.close()
+        return 0, 0
+
+    threads: dict[str, list[dict]] = {}
+    for msg in messages:
+        threads.setdefault(str(msg["thread_id"]), []).append(msg)
+
+    inserted = 0
+    duplicates = 0
+    for _tid, thread_messages in tqdm(threads.items(), desc="Importing", file=sys.stderr):
+        thread_messages.sort(key=lambda m: m["created_at"])
+        canonical_thread_id = _canonical_thread_id_for_messages(
+            thread_messages,
+            platform=platform,
+            account_id=account_id,
+        )
+
+        for msg in thread_messages:
+            ts_iso = iso_from_epoch(msg["created_at"])
+            if not ts_iso:
+                continue
+            message_id = _message_id_for_message(
+                msg,
+                platform=platform,
+                account_id=account_id,
+                canonical_thread_id=canonical_thread_id,
+            )
+            message_meta = _build_message_meta(msg["content"] or "")
+            was_inserted = db.insert_message(
+                con,
+                message_id,
+                canonical_thread_id,
+                platform,
+                account_id,
+                ts_iso,
+                msg["role"] or "",
+                msg["content"] or "",
+                msg.get("thread_title"),
+                source_id,
+                str(msg.get("thread_id") or "") or None,
+                str(msg.get("source_message_id") or "") or None,
+                message_meta,
+            )
+            if was_inserted:
+                inserted += 1
+            else:
+                duplicates += 1
+        con.commit()
+
+    con.close()
+    return inserted, duplicates
+
+
 def run(
     file_path: Path,
     db_path: Path,
@@ -69,66 +186,25 @@ def run(
     platform = platform or format_name
     source_id = source_id or f"import_{file_path.stem if not is_auto else format_name}"
 
-    con = db.get_connection(db_path)
-    db.ensure_schema(con)
-
     print(f"Parsing {format_name} export: {file_path}", file=sys.stderr)
     messages = list(parse(file_path, format_name))
 
     if not messages:
         print("No messages found in export.", file=sys.stderr)
-        con.close()
         return 0, 0
 
     thread_ids = set(m["thread_id"] for m in messages)
     print(f"Found {len(messages)} messages in {len(thread_ids)} threads.", file=sys.stderr)
 
-    # Group by thread
-    threads: dict[str, list[dict]] = {}
-    for msg in messages:
-        threads.setdefault(msg["thread_id"], []).append(msg)
-
-    inserted = 0
-    duplicates = 0
-
-    for _tid, thread_messages in tqdm(threads.items(), desc="Importing", file=sys.stderr):
-        thread_messages.sort(key=lambda m: m["created_at"])
-        first = thread_messages[0]
-        first_snip = (first["content"] or "")[:256]
-
-        canonical_thread_id = sha1("|".join([
-            platform,
-            account_id,
-            norm_text(first["thread_title"]),
-            str(round_epoch(first["created_at"]) or ""),
-            first["role"] or "",
-            norm_text(first_snip),
-        ]))
-
-        for msg in thread_messages:
-            ts_round = round_epoch(msg["created_at"]) or 0
-            message_id = sha1("|".join([
-                platform, account_id, canonical_thread_id, msg["role"] or "",
-                str(ts_round), norm_text(msg["content"] or ""),
-            ]))
-
-            ts_iso = iso_from_epoch(msg["created_at"])
-            if not ts_iso:
-                continue
-
-            was_inserted = db.insert_message(
-                con, message_id, canonical_thread_id, platform, account_id,
-                ts_iso, msg["role"] or "", msg["content"] or "",
-                msg["thread_title"], source_id,
-            )
-
-            if was_inserted:
-                inserted += 1
-            else:
-                duplicates += 1
-
-        con.commit()
-
+    inserted, duplicates = ingest_parsed_messages(
+        messages,
+        db_path=db_path,
+        platform=platform,
+        account_id=account_id,
+        source_id=source_id,
+    )
+    con = db.get_connection(db_path)
+    db.ensure_schema(con)
     total = db.message_count(con)
     con.close()
 
@@ -211,13 +287,17 @@ def run_source(
         print(f"Unknown source '{source_name}'. Run 'mychatarchive sources list'.", file=sys.stderr)
         return 0, 0
 
+    fmt = src.get("format")
+    account = src.get("account", "main")
+    source_type = src.get("type", "path")
+
+    if source_type == "live":
+        return run_live_source(source_name, db_path)
+
     path = Path(src["path"]).expanduser()
     if not path.exists():
         print(f"Source path does not exist: {path}", file=sys.stderr)
         return 0, 0
-
-    fmt = src.get("format")
-    account = src.get("account", "main")
 
     print(f"Importing from source '{source_name}' ({path})", file=sys.stderr)
 
@@ -234,6 +314,48 @@ def run_source(
             source_id=f"source_{source_name}",
         )
         return result or (0, 0)
+
+
+def run_live_source(source_name: str, db_path: Path):
+    """Import from a named live source using DB-first selector resolution."""
+    from mychatarchive.config import get_source
+
+    src = get_source(source_name)
+    if src is None:
+        print(f"Unknown source '{source_name}'. Run 'mychatarchive sources list'.", file=sys.stderr)
+        return 0, 0
+
+    provider = src.get("provider", "chatgpt")
+    selector = src.get("selector")
+    account = src.get("account", "main")
+    if not selector:
+        print(f"Live source '{source_name}' is missing a selector.", file=sys.stderr)
+        return 0, 0
+
+    resolved_selector, resolution_meta = choose_live_selector(db_path, selector)
+    print(
+        f"Importing live source '{source_name}' via {provider} "
+        f"(selector={selector!r}, resolved={resolved_selector!r})",
+        file=sys.stderr,
+    )
+
+    messages, live_meta = fetch_live_messages(provider, resolved_selector)
+    for message in messages:
+        if not message.get("thread_title") and src.get("title"):
+            message["thread_title"] = src["title"]
+
+    inserted, duplicates = ingest_parsed_messages(
+        messages,
+        db_path=db_path,
+        platform=provider,
+        account_id=account,
+        source_id=f"live_{source_name}",
+    )
+    print(
+        f"  Resolution: {resolution_meta.get('resolution')} -> {live_meta.get('provider_resolution')}",
+        file=sys.stderr,
+    )
+    return inserted, duplicates
 
 
 def run_auto_source(format_name: str, db_path: Path):

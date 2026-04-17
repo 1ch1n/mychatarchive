@@ -11,7 +11,8 @@ Example config.json:
   "drop_folder": "~/.mychatarchive/imports",
   "auto_sources": {"claude_code": true, "cursor": true},
   "sources": {
-    "nas": {"path": "//server.local/share/exports", "format": "chatgpt"}
+    "nas": {"type": "path", "path": "//server.local/share/exports", "format": "chatgpt"},
+    "chatgpt_live": {"type": "live", "provider": "chatgpt", "selector": "Project chat"}
   },
   "summarize": {
     "api_key": "sk-or-...",
@@ -23,6 +24,7 @@ Example config.json:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -168,9 +170,30 @@ def get_source(name: str) -> dict | None:
 def add_source(name: str, path: str, format_name: str | None = None, account: str = "main"):
     cfg = load_config()
     sources = cfg.setdefault("sources", {})
-    entry: dict = {"path": path, "account": account}
+    entry: dict = {"type": "path", "path": path, "account": account}
     if format_name:
         entry["format"] = format_name
+    sources[name] = entry
+    save_config(cfg)
+
+
+def add_live_source(
+    name: str,
+    selector: str,
+    provider: str = "chatgpt",
+    account: str = "main",
+    title: str | None = None,
+):
+    cfg = load_config()
+    sources = cfg.setdefault("sources", {})
+    entry: dict = {
+        "type": "live",
+        "provider": provider,
+        "selector": selector,
+        "account": account,
+    }
+    if title:
+        entry["title"] = title
     sources[name] = entry
     save_config(cfg)
 
@@ -193,3 +216,41 @@ def rename_source(old_name: str, new_name: str) -> bool:
     sources[new_name] = sources.pop(old_name)
     save_config(cfg)
     return True
+
+
+def get_itir_paths() -> list[Path]:
+    """Return configured ITIR/SensibLaw roots in priority order."""
+    cfg = load_config()
+    configured = cfg.get("itir", {}).get("paths", [])
+    if configured:
+        return [Path(path).expanduser() for path in configured]
+
+    env_value = os.environ.get("MYCHATARCHIVE_ITIR_PATHS", "").strip()
+    if env_value:
+        return [Path(path).expanduser() for path in env_value.split(os.pathsep) if path.strip()]
+
+    repo_root = Path(__file__).resolve().parents[2]
+    defaults = [
+        repo_root.parent / "ITIR-suite" / "SensibLaw",
+        Path.home() / "Documents" / "code" / "ITIR-suite" / "SensibLaw",
+    ]
+    return [path for path in defaults if path.exists()]
+
+
+def get_re_gpt_roots() -> list[Path]:
+    """Return candidate reverse-engineered-chatgpt roots in priority order."""
+    cfg = load_config()
+    configured = cfg.get("live", {}).get("re_gpt_paths", [])
+    if configured:
+        return [Path(path).expanduser() for path in configured]
+
+    env_value = os.environ.get("MYCHATARCHIVE_RE_GPT_PATHS", "").strip()
+    if env_value:
+        return [Path(path).expanduser() for path in env_value.split(os.pathsep) if path.strip()]
+
+    repo_root = Path(__file__).resolve().parents[2]
+    defaults = [
+        repo_root.parent / "ITIR-suite" / "reverse-engineered-chatgpt",
+        Path.home() / "Documents" / "code" / "ITIR-suite" / "reverse-engineered-chatgpt",
+    ]
+    return [path for path in defaults if path.exists()]

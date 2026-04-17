@@ -12,6 +12,7 @@ Commands:
     mychatarchive search <query>      Search from the command line
     mychatarchive info                Show archive stats
     mychatarchive mcp-config          Print MCP configuration JSON
+    mychatarchive notebooklm          Pack or ingest NotebookLM source bundles
 """
 
 import argparse
@@ -61,6 +62,13 @@ def main():
     sources_add.add_argument("path", help="Path to file or directory")
     sources_add.add_argument("--format", default=None, help="Force format (chatgpt, anthropic, etc.)")
     sources_add.add_argument("--account", default="main", help="Account identifier")
+
+    sources_add_live = sources_sub.add_parser("add-live", help="Add a named live import source")
+    sources_add_live.add_argument("name", help="Source name (e.g. 'chatgpt-live')")
+    sources_add_live.add_argument("selector", help="Conversation id, URL, or title selector")
+    sources_add_live.add_argument("--provider", default="chatgpt", help="Live provider name")
+    sources_add_live.add_argument("--account", default="main", help="Account identifier")
+    sources_add_live.add_argument("--title", default=None, help="Optional display title")
 
     sources_rm = sources_sub.add_parser("remove", help="Remove a source")
     sources_rm.add_argument("name", help="Source name to remove")
@@ -279,6 +287,37 @@ def main():
     )
     _add_db_arg(mcp_p)
 
+    # --- notebooklm ---
+    notebooklm_p = sub.add_parser("notebooklm", help="Pack and ingest NotebookLM source bundles")
+    notebooklm_sub = notebooklm_p.add_subparsers(dest="notebooklm_command")
+
+    notebooklm_pack = notebooklm_sub.add_parser("pack", help="Run sibling notebooklm-pack")
+    notebooklm_pack.add_argument("repo_list", help="Repo list file or scan root")
+    notebooklm_pack.add_argument("output_dir", help="Output directory for packed sources")
+    notebooklm_pack.add_argument("--max-sources", type=int, default=50, help="Max sources to emit")
+
+    notebooklm_ingest = notebooklm_sub.add_parser("ingest", help="Upload a notebooklm-pack manifest")
+    notebooklm_ingest.add_argument("--manifest", required=True, help="Path to manifest.json")
+    notebooklm_ingest.add_argument("--notebook-id", default=None, help="Existing notebook id")
+    notebooklm_ingest.add_argument("--notebook-url", default=None, help="Existing notebook URL")
+    notebooklm_ingest.add_argument("--notebook-title", default=None, help="Notebook title if creating")
+    notebooklm_ingest.add_argument("--wait-timeout", type=int, default=None, help="Per-source wait timeout")
+    notebooklm_ingest.add_argument("--upload-concurrency", type=int, default=None, help="Upload concurrency")
+    notebooklm_ingest.add_argument("--notebooklm-cli", default=None, help="Path to notebooklm CLI")
+    notebooklm_ingest.add_argument("--output", required=True, help="Output JSON path")
+
+    notebooklm_pack_ingest = notebooklm_sub.add_parser("pack-ingest", help="Pack then upload to NotebookLM")
+    notebooklm_pack_ingest.add_argument("repo_list", help="Repo list file or scan root")
+    notebooklm_pack_ingest.add_argument("output_dir", help="Output directory for packed sources")
+    notebooklm_pack_ingest.add_argument("--max-sources", type=int, default=50, help="Max sources to emit")
+    notebooklm_pack_ingest.add_argument("--notebook-id", default=None, help="Existing notebook id")
+    notebooklm_pack_ingest.add_argument("--notebook-url", default=None, help="Existing notebook URL")
+    notebooklm_pack_ingest.add_argument("--notebook-title", default=None, help="Notebook title if creating")
+    notebooklm_pack_ingest.add_argument("--wait-timeout", type=int, default=None, help="Per-source wait timeout")
+    notebooklm_pack_ingest.add_argument("--upload-concurrency", type=int, default=None, help="Upload concurrency")
+    notebooklm_pack_ingest.add_argument("--notebooklm-cli", default=None, help="Path to notebooklm CLI")
+    notebooklm_pack_ingest.add_argument("--output", required=True, help="Output JSON path")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -291,6 +330,10 @@ def main():
 
     if args.command == "sources":
         _cmd_sources(args)
+        return
+
+    if args.command == "notebooklm":
+        _cmd_notebooklm(args)
         return
 
     db_path = args.db or get_db_path()
@@ -501,7 +544,7 @@ def _cmd_sync(args, db_path: Path):
 
 
 def _cmd_sources(args):
-    from mychatarchive.config import get_sources, add_source, remove_source, rename_source
+    from mychatarchive.config import add_live_source, add_source, remove_source, rename_source
 
     cmd = args.sources_command
 
@@ -515,6 +558,21 @@ def _cmd_sources(args):
         if args.format:
             print(f"  Format: {args.format}")
         print(f"  Account: {args.account}")
+        print(f"\nUse: mychatarchive import --from {args.name}")
+
+    elif cmd == "add-live":
+        add_live_source(
+            args.name,
+            args.selector,
+            provider=args.provider,
+            account=args.account,
+            title=args.title,
+        )
+        print(f"Live source '{args.name}' added: {args.selector}")
+        print(f"  Provider: {args.provider}")
+        print(f"  Account:  {args.account}")
+        if args.title:
+            print(f"  Title:    {args.title}")
         print(f"\nUse: mychatarchive import --from {args.name}")
 
     elif cmd == "remove":
@@ -569,13 +627,21 @@ def _cmd_sources_list():
         print()
         print(f"  NAMED SOURCES ({len(sources)}):")
         for name, cfg in sources.items():
-            path = cfg.get("path", "?")
-            fmt = cfg.get("format", "auto-detect")
+            source_type = cfg.get("type", "path")
             account = cfg.get("account", "main")
-            exists = "✓" if Path(path).expanduser().exists() else "✗"
             print(f"    {name}")
-            print(f"      Path:    {path} [{exists}]")
-            print(f"      Format:  {fmt}")
+            print(f"      Type:    {source_type}")
+            if source_type == "live":
+                print(f"      Provider: {cfg.get('provider', 'chatgpt')}")
+                print(f"      Selector: {cfg.get('selector', '?')}")
+                if cfg.get("title"):
+                    print(f"      Title:    {cfg.get('title')}")
+            else:
+                path = cfg.get("path", "?")
+                fmt = cfg.get("format", "auto-detect")
+                exists = "✓" if Path(path).expanduser().exists() else "✗"
+                print(f"      Path:    {path} [{exists}]")
+                print(f"      Format:  {fmt}")
             print(f"      Account: {account}")
 
     print(f"{'─' * 60}")
@@ -707,14 +773,21 @@ def _cmd_export(args, db_path: Path):
 
     elif fmt == "csv":
         import csv
+        csv_rows = []
+        for message in messages:
+            row = dict(message)
+            if row.get("meta") is not None:
+                row["meta"] = json.dumps(row["meta"], ensure_ascii=False)
+            csv_rows.append(row)
         with open(output_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(
                 f,
                 fieldnames=["message_id", "thread_id", "platform", "account_id",
-                            "timestamp", "role", "content", "title", "source_id"],
+                            "timestamp", "role", "content", "title", "source_id",
+                            "source_thread_id", "source_message_id", "meta"],
             )
             writer.writeheader()
-            writer.writerows(messages)
+            writer.writerows(csv_rows)
 
         print(f"Exported {len(messages):,} messages to {output_path}")
         if thoughts and args.include_thoughts:
@@ -727,6 +800,51 @@ def _cmd_export(args, db_path: Path):
                 writer.writeheader()
                 writer.writerows(thoughts)
             print(f"  + {len(thoughts):,} thoughts to {thought_path}")
+
+
+def _cmd_notebooklm(args):
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    notebooklm_pack_repo = repo_root.parent / "notebooklm-pack"
+    pack_bin = notebooklm_pack_repo / "target" / "debug" / "notebooklm-pack"
+    ingest_script = notebooklm_pack_repo / "scripts" / "ingest_manifest.py"
+
+    if args.notebooklm_command is None:
+        print("Use one of: pack, ingest, pack-ingest", file=sys.stderr)
+        sys.exit(1)
+
+    def _run(cmd: list[str]):
+        proc = subprocess.run(cmd, check=False)
+        if proc.returncode != 0:
+            raise SystemExit(proc.returncode)
+
+    if args.notebooklm_command in {"pack", "pack-ingest"}:
+        if not pack_bin.exists():
+            print(f"notebooklm-pack binary not found: {pack_bin}", file=sys.stderr)
+            sys.exit(1)
+        cmd = [str(pack_bin), args.repo_list, args.output_dir, "--max-sources", str(args.max_sources)]
+        _run(cmd)
+
+    if args.notebooklm_command in {"ingest", "pack-ingest"}:
+        manifest = getattr(args, "manifest", None) or str(Path(args.output_dir) / "manifest.json")
+        if not ingest_script.exists():
+            print(f"NotebookLM ingest helper not found: {ingest_script}", file=sys.stderr)
+            sys.exit(1)
+        cmd = [sys.executable, str(ingest_script), "--manifest", manifest, "--output", args.output]
+        if args.notebook_id:
+            cmd.extend(["--notebook-id", args.notebook_id])
+        if args.notebook_url:
+            cmd.extend(["--notebook-url", args.notebook_url])
+        if args.notebook_title:
+            cmd.extend(["--notebook-title", args.notebook_title])
+        if args.wait_timeout is not None:
+            cmd.extend(["--wait-timeout", str(args.wait_timeout)])
+        if args.upload_concurrency is not None:
+            cmd.extend(["--upload-concurrency", str(args.upload_concurrency)])
+        if args.notebooklm_cli:
+            cmd.extend(["--notebooklm-cli", args.notebooklm_cli])
+        _run(cmd)
 
 
 def _cmd_embed(args, db_path: Path):

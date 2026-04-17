@@ -28,6 +28,8 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     sqlite_vec.load(con)
     con.enable_load_extension(False)
     con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA temp_store=MEMORY")
     return con
 
 
@@ -117,6 +119,25 @@ def _ensure_thread_summaries_v2(con: sqlite3.Connection, dim: int) -> None:
     con.commit()
 
 
+def _ensure_message_meta_column(con: sqlite3.Connection) -> None:
+    cols = {row[1] for row in con.execute("PRAGMA table_info(messages)").fetchall()}
+    if cols and "meta" not in cols:
+        con.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
+        con.commit()
+
+
+def _ensure_message_provenance_columns(con: sqlite3.Connection) -> None:
+    cols = {row[1] for row in con.execute("PRAGMA table_info(messages)").fetchall()}
+    if cols and "source_thread_id" not in cols:
+        con.execute("ALTER TABLE messages ADD COLUMN source_thread_id TEXT")
+    if cols and "source_message_id" not in cols:
+        con.execute("ALTER TABLE messages ADD COLUMN source_message_id TEXT")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_source_thread_id ON messages(source_thread_id)"
+    )
+    con.commit()
+
+
 def ensure_schema(con: sqlite3.Connection):
     """Create all tables (ingestion + brain). Idempotent."""
     dim = _get_embedding_dim()
@@ -133,7 +154,10 @@ def ensure_schema(con: sqlite3.Connection):
             role TEXT NOT NULL,
             text TEXT NOT NULL,
             title TEXT,
-            source_id TEXT NOT NULL
+            source_id TEXT NOT NULL,
+            source_thread_id TEXT,
+            source_message_id TEXT,
+            meta TEXT
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
@@ -190,6 +214,8 @@ def ensure_schema(con: sqlite3.Connection):
     """)
 
     con.commit()
+    _ensure_message_meta_column(con)
+    _ensure_message_provenance_columns(con)
 
     # Thread summaries: create or migrate to multi-segment schema
     _ensure_thread_summaries_v2(con, dim)
@@ -199,18 +225,36 @@ def ensure_schema(con: sqlite3.Connection):
 
 def insert_message(con: sqlite3.Connection, message_id: str, canonical_thread_id: str,
                    platform: str, account_id: str, ts: str, role: str, text: str,
-                   title: str, source_id: str) -> bool:
+                   title: str, source_id: str,
+                   source_thread_id: Optional[str] = None,
+                   source_message_id: Optional[str] = None,
+                   meta: Optional[dict] = None) -> bool:
     """Insert a message. Returns True if inserted, False if duplicate."""
     cur = con.execute(
         "INSERT OR IGNORE INTO messages "
-        "(message_id, canonical_thread_id, platform, account_id, ts, role, text, title, source_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (message_id, canonical_thread_id, platform, account_id, ts, role, text, title, source_id),
+        "("
+        "message_id, canonical_thread_id, platform, account_id, ts, role, text, title, source_id, "
+        "source_thread_id, source_message_id, meta"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            message_id,
+            canonical_thread_id,
+            platform,
+            account_id,
+            ts,
+            role,
+            text,
+            title,
+            source_id,
+            source_thread_id,
+            source_message_id,
+            json.dumps(meta) if meta else None,
+        ),
     )
     if cur.rowcount == 0:
         return False
-    con.execute("INSERT INTO messages_fts (text) VALUES (?)", (text,))
-    fts_rowid = con.execute("SELECT max(rowid) FROM messages_fts").fetchone()[0]
+    fts_cur = con.execute("INSERT INTO messages_fts (text) VALUES (?)", (text,))
+    fts_rowid = fts_cur.lastrowid
     con.execute(
         "INSERT INTO messages_fts_docids (rowid, message_id) VALUES (?,?)",
         (fts_rowid, message_id),
@@ -253,7 +297,8 @@ def platform_counts(con: sqlite3.Connection) -> list[tuple[str, int]]:
 def iter_messages(con: sqlite3.Connection, batch_size: int = 1000):
     cur = con.cursor()
     cur.execute("""
-        SELECT message_id, canonical_thread_id, ts, role, text, title
+        SELECT message_id, canonical_thread_id, ts, role, text, title,
+               source_thread_id, source_message_id, meta
         FROM messages ORDER BY canonical_thread_id, ts
     """)
     while True:
@@ -268,6 +313,9 @@ def iter_messages(con: sqlite3.Connection, batch_size: int = 1000):
                 "role": row[3],
                 "text": row[4],
                 "title": row[5],
+                "source_thread_id": row[6],
+                "source_message_id": row[7],
+                "meta": json.loads(row[8]) if row[8] else None,
             }
 
 
@@ -507,7 +555,7 @@ def export_messages(con: sqlite3.Connection, platform: Optional[str] = None,
                     limit: Optional[int] = None):
     query = """
         SELECT message_id, canonical_thread_id, platform, account_id,
-               ts, role, text, title, source_id
+               ts, role, text, title, source_id, source_thread_id, source_message_id, meta
         FROM messages ORDER BY platform, canonical_thread_id, ts
     """
     params: list = []
@@ -520,7 +568,9 @@ def export_messages(con: sqlite3.Connection, platform: Optional[str] = None,
     rows = con.execute(query, params).fetchall()
     return [
         {"message_id": r[0], "thread_id": r[1], "platform": r[2], "account_id": r[3],
-         "timestamp": r[4], "role": r[5], "content": r[6], "title": r[7], "source_id": r[8]}
+         "timestamp": r[4], "role": r[5], "content": r[6], "title": r[7], "source_id": r[8],
+         "source_thread_id": r[9], "source_message_id": r[10],
+         "meta": json.loads(r[11]) if r[11] else None}
         for r in rows
     ]
 
