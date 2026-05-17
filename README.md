@@ -158,11 +158,13 @@ mychatarchive serve
 
 The pipeline is incremental. Re-run `sync` any time -- SHA1 dedup means it's always safe. New messages get embedded on the next `embed` run without `--force`.
 
-### Required ITIR Enrichment
+### Current ITIR Enrichment
 
-MyChatArchive now expects a local `SensibLaw` checkout and attaches normalized
-token, structure, and relation metadata to every imported message. Ingest fails
-fast if that local shared-reducer surface is unavailable.
+MyChatArchive currently expects a local `SensibLaw` checkout and attaches
+shared-reducer metadata to every imported message. This is real ITIR-backed
+enrichment, but it is not yet the full ITIR archive/governance model. Today the
+ingest path stores token, structure, and relation metadata in the message
+`meta` field and fails fast if that local shared-reducer surface is unavailable.
 
 Point the importer at one or more local checkouts in priority order:
 
@@ -187,6 +189,56 @@ You can also set the same paths in `~/.mychatarchive/config.json`:
 If you keep multiple local checkouts, list the preferred one first. Existing
 canonical thread/message IDs remain stable; the extra metadata is additive and
 stored in the message `meta` field.
+
+For the deeper transition plan from shared-reducer enrichment to full
+archive-truth, provenance, predicate, and residual-aware integration, see
+[docs/itir-native-transition.md](docs/itir-native-transition.md).
+
+### Canonical Archive Vector Alignment
+
+MyChatArchive already has local vector search over its own SQLite archive:
+
+```bash
+mychatarchive sync --embed
+mychatarchive embed
+mychatarchive search "database architecture decisions"
+mychatarchive search "exact phrase or identifier" --mode keyword
+mychatarchive serve
+```
+
+The ITIR/robust-context-fetch alignment is narrower than "add vectors":
+vectors should attach to canonical archive rows, not generated Markdown
+sidecars or a parallel truth store. The bridge, agent wrapper scripts,
+semantic result provenance contract, hybrid merge path, and resolver opt-in
+flags now exist; `mychatarchive` semantic search remains a candidate-discovery
+surface until bridge-derived embeddings have been generated and validated in a
+live MCA archive.
+
+Agent scripts for that bridge are:
+
+- `scripts/mca_sync_from_canonical_archive.py`
+- `scripts/mca_embed_missing.py`
+- `scripts/mca_semantic_search.py`
+- `scripts/mca_hybrid_search.py`
+- `scripts/mca_resolve_result.py`
+
+Provenance fields for every vector or hybrid result:
+
+- source database path
+- canonical thread ID
+- source thread ID
+- source message ID or chunk ID
+- title
+- role
+- timestamp or timestamp range
+- score and/or distance
+- matched excerpt
+
+Implementation status: the canonical archive bridge, agent scripts, semantic
+provenance contract, hybrid merge contract, and robust-context-fetch resolver
+flags have focused tests and missing-DB smoke coverage. Live embedding
+generation and happy-path semantic/hybrid retrieval still require a populated
+MCA archive DB.
 
 ---
 

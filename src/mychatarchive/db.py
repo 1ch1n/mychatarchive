@@ -33,10 +33,14 @@ def insert_message(con, message_id: str, canonical_thread_id: str,
                    text: str, title: str, source_id: str,
                    source_thread_id: Optional[str] = None,
                    source_message_id: Optional[str] = None,
-                   meta: Optional[dict] = None) -> bool:
+                   meta: Optional[dict] = None,
+                   source_path: Optional[str] = None,
+                   source_bucket: Optional[str] = None,
+                   provenance_json: Optional[dict] = None) -> bool:
     return _b().insert_message(
         con, message_id, canonical_thread_id, platform, account_id,
         ts, role, text, title, source_id, source_thread_id, source_message_id, meta,
+        source_path, source_bucket, provenance_json,
     )
 
 
@@ -151,6 +155,138 @@ def export_messages(con, platform: str | None = None, limit: int | None = None):
 
 def export_thoughts(con):
     return _b().export_thoughts(con)
+
+
+def insert_message_block(
+    con,
+    block_id: str,
+    message_id: str,
+    canonical_thread_id: str,
+    block_index: int,
+    block_type: str,
+    text: str,
+    source_path: Optional[str] = None,
+    source_bucket: Optional[str] = None,
+    provenance_json: Optional[dict] = None,
+    meta: Optional[dict] = None,
+) -> bool:
+    return _b().insert_message_block(
+        con,
+        block_id,
+        message_id,
+        canonical_thread_id,
+        block_index,
+        block_type,
+        text,
+        source_path,
+        source_bucket,
+        provenance_json,
+        meta,
+    )
+
+
+def list_message_blocks(
+    con,
+    message_id: Optional[str] = None,
+    canonical_thread_id: Optional[str] = None,
+) -> list[dict]:
+    return _b().list_message_blocks(
+        con,
+        message_id=message_id,
+        canonical_thread_id=canonical_thread_id,
+    )
+
+
+def insert_provenance_ref(
+    con,
+    provenance_ref_id: str,
+    message_id: Optional[str],
+    block_id: Optional[str],
+    ref_index: int,
+    source_id: Optional[str] = None,
+    source_thread_id: Optional[str] = None,
+    source_message_id: Optional[str] = None,
+    source_path: Optional[str] = None,
+    source_bucket: Optional[str] = None,
+    locator_json: Optional[dict] = None,
+    meta: Optional[dict] = None,
+) -> bool:
+    return _b().insert_provenance_ref(
+        con,
+        provenance_ref_id,
+        message_id,
+        block_id,
+        ref_index,
+        source_id,
+        source_thread_id,
+        source_message_id,
+        source_path,
+        source_bucket,
+        locator_json,
+        meta,
+    )
+
+
+def list_provenance_refs(
+    con,
+    message_id: Optional[str] = None,
+    block_id: Optional[str] = None,
+) -> list[dict]:
+    return _b().list_provenance_refs(con, message_id=message_id, block_id=block_id)
+
+
+def insert_predicate_projection(
+    con,
+    message_id: str,
+    canonical_thread_id: str,
+    projection: dict,
+) -> int:
+    return _b().insert_predicate_projection(con, message_id, canonical_thread_id, projection)
+
+
+def list_predicate_refs(
+    con,
+    message_id: Optional[str] = None,
+    canonical_thread_id: Optional[str] = None,
+) -> list[dict]:
+    return _b().list_predicate_refs(
+        con,
+        message_id=message_id,
+        canonical_thread_id=canonical_thread_id,
+    )
+
+
+def list_predicate_roles(
+    con,
+    predicate_ref_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> list[dict]:
+    return _b().list_predicate_roles(
+        con,
+        predicate_ref_id=predicate_ref_id,
+        message_id=message_id,
+    )
+
+
+def search_predicate_candidates(
+    con,
+    structural_signatures: list[str],
+    role_arguments: Optional[list[str]] = None,
+    *,
+    limit: int = 20,
+    platform: str | list[str] | None = None,
+    cutoff_iso: str | None = None,
+    group_thread_ids: set[str] | None = None,
+) -> list[dict]:
+    return _b().search_predicate_candidates(
+        con,
+        structural_signatures,
+        role_arguments,
+        limit=limit,
+        platform=platform,
+        cutoff_iso=cutoff_iso,
+        group_thread_ids=group_thread_ids,
+    )
 
 
 # ── Thread summaries ──────────────────────────────────────────────────────────

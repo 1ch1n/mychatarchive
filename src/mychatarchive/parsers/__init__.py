@@ -15,6 +15,13 @@ PARSERS = {
 }
 
 DIRECTORY_PARSERS = {"claude_code", "cursor"}
+OPTIONAL_ARCHIVE_FIELDS = (
+    "source_path",
+    "source_bucket",
+    "provenance_json",
+    "content_blocks",
+    "provenance_refs",
+)
 
 
 def detect_format(file_path: Path) -> str | None:
@@ -104,4 +111,13 @@ def parse(file_path: Path, format_name: str | None = None) -> Iterator[dict]:
     if format_name not in PARSERS:
         raise ValueError(f"Unknown format '{format_name}'. Options: {', '.join(PARSERS.keys())}")
 
-    yield from PARSERS[format_name].parse(str(file_path))
+    for message in PARSERS[format_name].parse(str(file_path)):
+        if not isinstance(message, dict):
+            continue
+        normalized = dict(message)
+        normalized.setdefault("thread_title", "")
+        normalized.setdefault("source_message_id", "")
+        for key in OPTIONAL_ARCHIVE_FIELDS:
+            if key in message:
+                normalized[key] = message[key]
+        yield normalized

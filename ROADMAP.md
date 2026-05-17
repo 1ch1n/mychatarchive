@@ -52,6 +52,101 @@ A personal AI memory system that compounds from daily usage. Start with searchab
 
 ---
 
+## Phase 2.5: ITIR-Native Archive Transition
+
+**Goal:** Move from shared-reducer enrichment in `messages.meta` to a full
+archive-truth + provenance + predicate/residual-aware architecture.
+
+### Archive Truth
+- [ ] Add `source_path`, `source_bucket`, and `provenance_json` to `messages`
+- [ ] Add `message_blocks`
+- [ ] Add `provenance_refs`
+- [ ] Preserve backward compatibility with existing SQLite archives
+
+### Ingest Spine Alignment
+- [ ] Route `import` / `sync` through the archive ingest spine instead of
+      maintaining a diverging parser/provenance layer
+- [ ] Preserve existing source workflows: named sources, auto-discovery, live sources
+- [ ] Reuse normalized batch sidecars (`itir.normalized.artifact.v1`)
+
+### ITIR Projections
+- [ ] Promote predicate-level projections out of `messages.meta["itir"]`
+- [ ] Persist bounded predicate refs, roles, polarity/modality, and span refs
+- [ ] Add rebuildable predicate index surfaces
+
+### Residual-Aware Retrieval
+- [ ] Use predicate overlap/residuals in retrieval ranking and context assembly
+- [ ] Surface contradictions, unresolved pressure, and follow obligations
+- [ ] Make explanations provenance- and governance-aware
+
+---
+
+## Phase 2.6: Canonical Archive Vector Alignment
+
+**Goal:** Align MyChatArchive's existing local vector search with the canonical
+AI conversation archive used by robust-context-fetch and ITIR-suite agents.
+
+This is not a replacement for the current MCA search pipeline. It is a bridge
+contract: canonical archive rows remain the source of truth; MCA vectors become
+an optional retrieval index over deterministic message/chunk records.
+
+### Current State
+- [x] MCA local embeddings via sentence-transformers
+- [x] MCA vector storage through sqlite-vec
+- [x] MCA FTS5 keyword search
+- [x] MCA semantic CLI search
+- [x] MCA MCP tools for semantic context retrieval
+- [x] Canonical `~/chat_archive.sqlite` to MCA bridge
+- [x] Agent-safe bridge/search scripts
+- [x] Hybrid FTS + vector retrieval over shared canonical IDs
+- [x] robust-context-fetch semantic/hybrid resolver flags
+
+### Six-Lane Integration Plan
+
+1. **Canonical Schema Bridge**
+   - [x] Import canonical archive message rows into MCA without creating a
+         second source of truth
+   - [x] Preserve `canonical_thread_id`, `source_thread_id`,
+         `source_message_id`, role, text, title, timestamp, platform, account,
+         and provenance
+   - [x] Make re-runs idempotent
+
+2. **Agent Script Wrappers**
+   - [x] Add `scripts/mca_sync_from_canonical_archive.py`
+   - [x] Add `scripts/mca_embed_missing.py`
+   - [x] Add `scripts/mca_semantic_search.py`
+   - [x] Add `scripts/mca_hybrid_search.py`
+   - [x] Add `scripts/mca_resolve_result.py`
+   - [x] Use stable JSON output and explicit DB arguments
+
+3. **Semantic Search Contract**
+   - [x] Every semantic result includes canonical IDs, chunk/message IDs, title,
+         timestamps, source DB, score/distance, and excerpt
+   - [x] No semantic result is agent-facing without provenance
+
+4. **Hybrid Retrieval**
+   - [x] Merge FTS candidates and semantic candidates by canonical IDs
+   - [x] Weight exact identifiers, names, dates, and quoted phrases above vague
+         embedding matches
+   - [x] Expose `mychatarchive search <query> --mode hybrid`
+
+5. **Resolver Integration**
+   - [x] Add optional `--semantic`, `--hybrid`, `--mca-db`, and `--mca-limit`
+         to the robust-context-fetch resolver after the bridge exists
+   - [x] Keep resolver behavior DB-first and lexical unless semantic/hybrid is
+         explicitly requested
+
+6. **Docs and Validation**
+   - [x] Update README, roadmap, and skill examples after implementation lands
+   - [x] Keep implemented behavior separate from target-contract text
+   - [x] Validate bridge import idempotency
+   - [ ] Validate embeddings for bridge-derived chunks
+   - [x] Validate semantic results include canonical provenance
+   - [x] Validate hybrid search returns exact and semantic matches
+   - [x] Validate resolver semantic/hybrid JSON output
+
+---
+
 ## Phase 3: Analysis Engine
 
 **Goal:** Run deep research prompts against your own archive. Not a chat -- a batch analysis tool.

@@ -15,6 +15,7 @@ import sys
 from typing import Any
 
 from mychatarchive.config import get_itir_paths
+from mychatarchive.itir_projection import build_predicate_projection
 
 _SHARED_REDUCER_MODULE = "sensiblaw.interfaces.shared_reducer"
 
@@ -51,6 +52,11 @@ class ITIREnrichment:
             payload["relational_bundle"] = reducer.collect_canonical_relational_bundle(text)
         except Exception as exc:
             payload["relational_bundle_error"] = type(exc).__name__
+
+        try:
+            payload["predicate_projection"] = build_predicate_projection(text, reducer)
+        except Exception as exc:
+            payload["predicate_projection_error"] = type(exc).__name__
 
         return payload
 

@@ -129,6 +129,9 @@ def main():
     # --- embed ---
     embed_p = sub.add_parser("embed", help="Generate vector embeddings for all messages")
     embed_p.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
+    embed_p.add_argument("--max-messages", type=int, default=None, help="Embed at most this many new messages, then stop cleanly")
+    embed_p.add_argument("--max-chunks", type=int, default=None, help="Embed at most this many new chunks, then stop cleanly")
+    embed_p.add_argument("--progress-interval", type=int, default=10, help="Seconds between progress/ETA log lines")
     embed_p.add_argument("--force", action="store_true", help="Re-embed all messages")
     _add_db_arg(embed_p)
 
@@ -236,7 +239,7 @@ def main():
     search_p.add_argument("--limit", type=int, default=10, help="Max results")
     search_p.add_argument(
         "--mode",
-        choices=["semantic", "keyword"],
+        choices=["semantic", "keyword", "hybrid"],
         default="semantic",
         help="Search mode (default: semantic)",
     )
@@ -853,7 +856,14 @@ def _cmd_embed(args, db_path: Path):
         sys.exit(1)
 
     from mychatarchive.embeddings import run
-    run(db_path=db_path, batch_size=args.batch_size, force=args.force)
+    run(
+        db_path=db_path,
+        batch_size=args.batch_size,
+        force=args.force,
+        max_messages=args.max_messages,
+        max_chunks=args.max_chunks,
+        progress_interval=args.progress_interval,
+    )
 
 
 def _cmd_summarize(args, db_path: Path):
@@ -1122,7 +1132,7 @@ def _cmd_search(args, db_path: Path):
                 print(f"Thread: {title}")
                 print(f"Role: {role} | Time: {row[2]}")
                 print(f"{row[0][:500]}")
-    else:
+    elif args.mode == "keyword":
         results = db.fts_search(
             con, query, limit=args.limit, platform=platform,
             cutoff_iso=cutoff_iso, sort_by_time=sort_by_time,
@@ -1138,6 +1148,39 @@ def _cmd_search(args, db_path: Path):
             print(f"Thread: {row[5] or 'Untitled'}")
             print(f"Role: {row[4]} | Time: {row[3]}")
             print(f"{row[1][:500]}")
+    else:
+        from mychatarchive.embeddings import embed_single
+        from mychatarchive.hybrid_search import search_hybrid
+
+        embedding = embed_single(query)
+        results = search_hybrid(
+            con,
+            query,
+            embedding,
+            limit=args.limit,
+            platform=platform,
+            cutoff_iso=cutoff_iso,
+            sort_by_time=sort_by_time,
+            group_thread_ids=group_thread_ids,
+        )
+        if not results:
+            print("No results found.")
+            con.close()
+            return
+
+        for i, row in enumerate(results, 1):
+            scores = row["scores"]
+            sources = "+".join(row["source"])
+            print(f"\n--- Result {i} (hybrid: {scores['hybrid']}, {sources}) ---")
+            print(f"Thread: {row['title'] or 'Untitled'}")
+            print(f"Role: {row['role'] or '?'} | Time: {row['timestamp']}")
+            print(
+                "Scores: "
+                f"keyword={scores['keyword']} "
+                f"semantic={scores['semantic']} "
+                f"exact={scores['exact']}"
+            )
+            print(f"{row['text'][:500]}")
 
     con.close()
 

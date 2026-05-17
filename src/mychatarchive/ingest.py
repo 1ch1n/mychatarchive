@@ -3,17 +3,27 @@
 import hashlib
 import re
 import datetime
+import inspect
 import sys
 from pathlib import Path
+from typing import Any
 
 from tqdm import tqdm
 
 from mychatarchive import db
+from mychatarchive.backends import get_storage
 from mychatarchive.itir import enrich_text as enrich_text_with_itir
 from mychatarchive.live import choose_live_selector, fetch_live_messages
 from mychatarchive.parsers import parse, detect_format
 
 IMPORTABLE_EXTENSIONS = {".json", ".jsonl"}
+OPTIONAL_ARCHIVE_TRUTH_FIELDS = (
+    "source_path",
+    "source_bucket",
+    "provenance_json",
+    "content_blocks",
+    "provenance_refs",
+)
 
 
 def norm_text(s: str | None) -> str:
@@ -53,6 +63,179 @@ def _build_message_meta(content: str | None) -> dict | None:
         return None
     itir_payload = enrich_text_with_itir(content)
     return {"itir": itir_payload}
+
+
+def _extract_optional_archive_fields(msg: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for key in OPTIONAL_ARCHIVE_TRUTH_FIELDS:
+        value = msg.get(key)
+        if value is not None:
+            fields[key] = value
+    return fields
+
+
+def _legacy_meta_with_archive_truth(
+    message_meta: dict[str, Any] | None,
+    optional_fields: dict[str, Any],
+    *,
+    include_fields: tuple[str, ...] = OPTIONAL_ARCHIVE_TRUTH_FIELDS,
+) -> dict[str, Any] | None:
+    if not optional_fields or not include_fields:
+        return message_meta
+
+    merged = dict(message_meta or {})
+    archive_truth = merged.get("archive_truth")
+    if not isinstance(archive_truth, dict):
+        archive_truth = {}
+
+    for key in include_fields:
+        if key in optional_fields:
+            archive_truth[key] = optional_fields[key]
+    merged["archive_truth"] = archive_truth
+    return merged
+
+
+def _supported_insert_params() -> set[str]:
+    try:
+        return set(inspect.signature(db.insert_message).parameters)
+    except (TypeError, ValueError):
+        return set()
+
+
+def _resolve_optional_writer(hook_names: tuple[str, ...]):
+    for name in hook_names:
+        writer = getattr(db, name, None)
+        if callable(writer):
+            return writer
+    storage = get_storage()
+    for name in hook_names:
+        writer = getattr(storage, name, None)
+        if callable(writer):
+            return writer
+    return None
+
+
+def _call_optional_writer(
+    writer,
+    *,
+    con,
+    message_id: str,
+    payload,
+    payload_kw: str,
+) -> None:
+    attempts = (
+        lambda: writer(con, message_id, payload),
+        lambda: writer(con=con, message_id=message_id, **{payload_kw: payload}),
+        lambda: writer(connection=con, message_id=message_id, **{payload_kw: payload}),
+    )
+    for attempt in attempts:
+        try:
+            attempt()
+            return
+        except TypeError:
+            continue
+    raise TypeError(f"Unable to call optional writer {writer!r} with payload '{payload_kw}'.")
+
+
+def _persist_optional_side_tables(
+    con,
+    message_id: str,
+    canonical_thread_id: str,
+    optional_fields: dict[str, Any],
+) -> None:
+    content_blocks = optional_fields.get("content_blocks")
+    if content_blocks is not None:
+        writer = _resolve_optional_writer((
+            "insert_message_blocks",
+            "upsert_message_blocks",
+            "insert_content_blocks",
+            "insert_message_block",
+        ))
+        if writer:
+            if getattr(writer, "__name__", "") == "insert_message_block":
+                for idx, block in enumerate(content_blocks):
+                    if not isinstance(block, dict):
+                        continue
+                    block_id = str(block.get("block_id") or f"{message_id}:block:{idx}")
+                    db.insert_message_block(
+                        con,
+                        block_id=block_id,
+                        message_id=message_id,
+                        canonical_thread_id=str(
+                            block.get("canonical_thread_id") or block.get("thread_id") or canonical_thread_id
+                        ),
+                        block_index=int(block.get("block_index", idx)),
+                        block_type=str(block.get("block_type") or block.get("type") or "text"),
+                        text=str(block.get("text") or block.get("content") or ""),
+                        source_path=str(block.get("source_path") or optional_fields.get("source_path") or "") or None,
+                        source_bucket=str(block.get("source_bucket") or optional_fields.get("source_bucket") or "") or None,
+                        provenance_json=block.get("provenance_json"),
+                        meta=block.get("meta"),
+                    )
+            else:
+                _call_optional_writer(
+                    writer,
+                    con=con,
+                    message_id=message_id,
+                    payload=content_blocks,
+                    payload_kw="blocks",
+                )
+
+    provenance_refs = optional_fields.get("provenance_refs")
+    if provenance_refs is not None:
+        writer = _resolve_optional_writer((
+            "insert_provenance_refs",
+            "upsert_provenance_refs",
+            "insert_message_provenance_refs",
+            "insert_provenance_ref",
+        ))
+        if writer:
+            if getattr(writer, "__name__", "") == "insert_provenance_ref":
+                for idx, ref in enumerate(provenance_refs):
+                    if not isinstance(ref, dict):
+                        continue
+                    provenance_ref_id = str(ref.get("provenance_ref_id") or f"{message_id}:prov:{idx}")
+                    db.insert_provenance_ref(
+                        con,
+                        provenance_ref_id=provenance_ref_id,
+                        message_id=message_id,
+                        block_id=str(ref.get("block_id") or "") or None,
+                        ref_index=int(ref.get("ref_index", idx)),
+                        source_id=str(ref.get("source_id") or "") or None,
+                        source_thread_id=str(ref.get("source_thread_id") or "") or None,
+                        source_message_id=str(ref.get("source_message_id") or "") or None,
+                        source_path=str(ref.get("source_path") or optional_fields.get("source_path") or "") or None,
+                        source_bucket=str(ref.get("source_bucket") or optional_fields.get("source_bucket") or "") or None,
+                        locator_json=ref.get("locator_json"),
+                        meta=ref.get("meta"),
+                    )
+            else:
+                _call_optional_writer(
+                    writer,
+                    con=con,
+                    message_id=message_id,
+                    payload=provenance_refs,
+                    payload_kw="refs",
+                )
+
+
+def _persist_predicate_projection(
+    con,
+    message_id: str,
+    canonical_thread_id: str,
+    message_meta: dict[str, Any] | None,
+) -> None:
+    if not isinstance(message_meta, dict):
+        return
+    itir_payload = message_meta.get("itir")
+    if not isinstance(itir_payload, dict):
+        return
+    projection = itir_payload.get("predicate_projection")
+    if not isinstance(projection, dict):
+        return
+    writer = getattr(db, "insert_predicate_projection", None)
+    if callable(writer):
+        writer(con, message_id, canonical_thread_id, projection)
 
 
 def _canonical_thread_id_for_messages(
@@ -119,6 +302,7 @@ def ingest_parsed_messages(
 
     inserted = 0
     duplicates = 0
+    insert_params = _supported_insert_params()
     for _tid, thread_messages in tqdm(threads.items(), desc="Importing", file=sys.stderr):
         thread_messages.sort(key=lambda m: m["created_at"])
         canonical_thread_id = _canonical_thread_id_for_messages(
@@ -137,24 +321,45 @@ def ingest_parsed_messages(
                 account_id=account_id,
                 canonical_thread_id=canonical_thread_id,
             )
+            optional_fields = _extract_optional_archive_fields(msg)
             message_meta = _build_message_meta(msg["content"] or "")
-            was_inserted = db.insert_message(
-                con,
-                message_id,
-                canonical_thread_id,
-                platform,
-                account_id,
-                ts_iso,
-                msg["role"] or "",
-                msg["content"] or "",
-                msg.get("thread_title"),
-                source_id,
-                str(msg.get("thread_id") or "") or None,
-                str(msg.get("source_message_id") or "") or None,
-                message_meta,
-            )
+
+            insert_kwargs: dict[str, Any] = {
+                "con": con,
+                "message_id": message_id,
+                "canonical_thread_id": canonical_thread_id,
+                "platform": platform,
+                "account_id": account_id,
+                "ts": ts_iso,
+                "role": msg["role"] or "",
+                "text": msg["content"] or "",
+                "title": msg.get("thread_title"),
+                "source_id": source_id,
+                "source_thread_id": str(msg.get("thread_id") or "") or None,
+                "source_message_id": str(msg.get("source_message_id") or "") or None,
+                "meta": message_meta,
+            }
+
+            direct_optional = ("source_path", "source_bucket", "provenance_json")
+            fallback_fields = [
+                key for key in OPTIONAL_ARCHIVE_TRUTH_FIELDS
+                if key in optional_fields and key not in insert_params
+            ]
+            if fallback_fields:
+                insert_kwargs["meta"] = _legacy_meta_with_archive_truth(
+                    message_meta,
+                    optional_fields,
+                    include_fields=tuple(fallback_fields),
+                )
+            for key in direct_optional:
+                if key in insert_params and key in optional_fields:
+                    insert_kwargs[key] = optional_fields[key]
+
+            was_inserted = db.insert_message(**insert_kwargs)
             if was_inserted:
                 inserted += 1
+                _persist_optional_side_tables(con, message_id, canonical_thread_id, optional_fields)
+                _persist_predicate_projection(con, message_id, canonical_thread_id, insert_kwargs["meta"])
             else:
                 duplicates += 1
         con.commit()

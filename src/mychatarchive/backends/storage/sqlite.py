@@ -8,7 +8,7 @@ import re
 import sqlite3
 import struct
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 import sqlite_vec
 
@@ -132,9 +132,16 @@ def _ensure_message_provenance_columns(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE messages ADD COLUMN source_thread_id TEXT")
     if cols and "source_message_id" not in cols:
         con.execute("ALTER TABLE messages ADD COLUMN source_message_id TEXT")
+    if cols and "source_path" not in cols:
+        con.execute("ALTER TABLE messages ADD COLUMN source_path TEXT")
+    if cols and "source_bucket" not in cols:
+        con.execute("ALTER TABLE messages ADD COLUMN source_bucket TEXT")
+    if cols and "provenance_json" not in cols:
+        con.execute("ALTER TABLE messages ADD COLUMN provenance_json TEXT")
     con.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_source_thread_id ON messages(source_thread_id)"
     )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_messages_source_bucket ON messages(source_bucket)")
     con.commit()
 
 
@@ -157,6 +164,9 @@ def ensure_schema(con: sqlite3.Connection):
             source_id TEXT NOT NULL,
             source_thread_id TEXT,
             source_message_id TEXT,
+            source_path TEXT,
+            source_bucket TEXT,
+            provenance_json TEXT,
             meta TEXT
         );
 
@@ -176,6 +186,65 @@ def ensure_schema(con: sqlite3.Connection):
             text TEXT NOT NULL,
             ts_start TEXT,
             ts_end TEXT,
+            meta TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS message_blocks (
+            block_id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            canonical_thread_id TEXT NOT NULL,
+            block_index INTEGER NOT NULL,
+            block_type TEXT NOT NULL,
+            text TEXT NOT NULL,
+            source_path TEXT,
+            source_bucket TEXT,
+            provenance_json TEXT,
+            meta TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS provenance_refs (
+            provenance_ref_id TEXT PRIMARY KEY,
+            message_id TEXT,
+            block_id TEXT,
+            ref_index INTEGER NOT NULL,
+            source_id TEXT,
+            source_thread_id TEXT,
+            source_message_id TEXT,
+            source_path TEXT,
+            source_bucket TEXT,
+            locator_json TEXT,
+            meta TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS predicate_refs (
+            predicate_ref_id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            canonical_thread_id TEXT NOT NULL,
+            predicate_ref TEXT NOT NULL,
+            atom_id TEXT,
+            predicate TEXT NOT NULL,
+            structural_signature TEXT,
+            polarity TEXT,
+            modality TEXT,
+            domain TEXT,
+            wrapper_status TEXT,
+            evidence_only INTEGER NOT NULL DEFAULT 1,
+            source_spans_json TEXT,
+            provenance_refs_json TEXT,
+            meta TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS predicate_roles (
+            predicate_role_id TEXT PRIMARY KEY,
+            predicate_ref_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            role_name TEXT NOT NULL,
+            role_value TEXT NOT NULL,
+            role_status TEXT,
+            entity_type TEXT,
+            cardinality TEXT,
+            members_json TEXT,
+            provenance_refs_json TEXT,
             meta TEXT
         );
 
@@ -201,6 +270,32 @@ def ensure_schema(con: sqlite3.Connection):
             added_at TEXT NOT NULL,
             PRIMARY KEY (canonical_thread_id, group_id)
         );
+    """)
+    cur.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_message_blocks_message_id
+        ON message_blocks(message_id);
+        CREATE INDEX IF NOT EXISTS idx_chunks_message_id
+        ON chunks(message_id);
+        CREATE INDEX IF NOT EXISTS idx_chunks_thread_id
+        ON chunks(canonical_thread_id);
+        CREATE INDEX IF NOT EXISTS idx_message_blocks_thread_id
+        ON message_blocks(canonical_thread_id);
+        CREATE INDEX IF NOT EXISTS idx_provenance_refs_message_id
+        ON provenance_refs(message_id);
+        CREATE INDEX IF NOT EXISTS idx_provenance_refs_block_id
+        ON provenance_refs(block_id);
+        CREATE INDEX IF NOT EXISTS idx_predicate_refs_message_id
+        ON predicate_refs(message_id);
+        CREATE INDEX IF NOT EXISTS idx_predicate_refs_signature
+        ON predicate_refs(structural_signature);
+        CREATE INDEX IF NOT EXISTS idx_predicate_refs_message_signature
+        ON predicate_refs(message_id, structural_signature);
+        CREATE INDEX IF NOT EXISTS idx_predicate_roles_predicate_ref_id
+        ON predicate_roles(predicate_ref_id);
+        CREATE INDEX IF NOT EXISTS idx_predicate_roles_message_id
+        ON predicate_roles(message_id);
+        CREATE INDEX IF NOT EXISTS idx_predicate_roles_lookup
+        ON predicate_roles(role_name, role_value, message_id);
     """)
 
     cur.execute(f"""
@@ -228,14 +323,17 @@ def insert_message(con: sqlite3.Connection, message_id: str, canonical_thread_id
                    title: str, source_id: str,
                    source_thread_id: Optional[str] = None,
                    source_message_id: Optional[str] = None,
-                   meta: Optional[dict] = None) -> bool:
+                   meta: Optional[dict] = None,
+                   source_path: Optional[str] = None,
+                   source_bucket: Optional[str] = None,
+                   provenance_json: Optional[dict] = None) -> bool:
     """Insert a message. Returns True if inserted, False if duplicate."""
     cur = con.execute(
         "INSERT OR IGNORE INTO messages "
         "("
         "message_id, canonical_thread_id, platform, account_id, ts, role, text, title, source_id, "
-        "source_thread_id, source_message_id, meta"
-        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "source_thread_id, source_message_id, source_path, source_bucket, provenance_json, meta"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             message_id,
             canonical_thread_id,
@@ -248,6 +346,9 @@ def insert_message(con: sqlite3.Connection, message_id: str, canonical_thread_id
             source_id,
             source_thread_id,
             source_message_id,
+            source_path,
+            source_bucket,
+            json.dumps(provenance_json) if provenance_json is not None else None,
             json.dumps(meta) if meta else None,
         ),
     )
@@ -298,7 +399,7 @@ def iter_messages(con: sqlite3.Connection, batch_size: int = 1000):
     cur = con.cursor()
     cur.execute("""
         SELECT message_id, canonical_thread_id, ts, role, text, title,
-               source_thread_id, source_message_id, meta
+               source_thread_id, source_message_id, source_path, source_bucket, provenance_json, meta
         FROM messages ORDER BY canonical_thread_id, ts
     """)
     while True:
@@ -315,7 +416,10 @@ def iter_messages(con: sqlite3.Connection, batch_size: int = 1000):
                 "title": row[5],
                 "source_thread_id": row[6],
                 "source_message_id": row[7],
-                "meta": json.loads(row[8]) if row[8] else None,
+                "source_path": row[8],
+                "source_bucket": row[9],
+                "provenance_json": json.loads(row[10]) if row[10] else None,
+                "meta": json.loads(row[11]) if row[11] else None,
             }
 
 
@@ -555,7 +659,8 @@ def export_messages(con: sqlite3.Connection, platform: Optional[str] = None,
                     limit: Optional[int] = None):
     query = """
         SELECT message_id, canonical_thread_id, platform, account_id,
-               ts, role, text, title, source_id, source_thread_id, source_message_id, meta
+               ts, role, text, title, source_id, source_thread_id, source_message_id,
+               source_path, source_bucket, provenance_json, meta
         FROM messages ORDER BY platform, canonical_thread_id, ts
     """
     params: list = []
@@ -569,9 +674,511 @@ def export_messages(con: sqlite3.Connection, platform: Optional[str] = None,
     return [
         {"message_id": r[0], "thread_id": r[1], "platform": r[2], "account_id": r[3],
          "timestamp": r[4], "role": r[5], "content": r[6], "title": r[7], "source_id": r[8],
-         "source_thread_id": r[9], "source_message_id": r[10],
-         "meta": json.loads(r[11]) if r[11] else None}
+         "source_thread_id": r[9], "source_message_id": r[10], "source_path": r[11],
+         "source_bucket": r[12], "provenance_json": json.loads(r[13]) if r[13] else None,
+         "meta": json.loads(r[14]) if r[14] else None}
         for r in rows
+    ]
+
+
+def insert_message_block(
+    con: sqlite3.Connection,
+    block_id: str,
+    message_id: str,
+    canonical_thread_id: str,
+    block_index: int,
+    block_type: str,
+    text: str,
+    source_path: Optional[str] = None,
+    source_bucket: Optional[str] = None,
+    provenance_json: Optional[dict] = None,
+    meta: Optional[dict] = None,
+) -> bool:
+    """Insert a structured block for a message. Returns False if duplicate block_id."""
+    cur = con.execute(
+        """
+        INSERT OR IGNORE INTO message_blocks
+            (block_id, message_id, canonical_thread_id, block_index, block_type, text,
+             source_path, source_bucket, provenance_json, meta)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            block_id,
+            message_id,
+            canonical_thread_id,
+            block_index,
+            block_type,
+            text,
+            source_path,
+            source_bucket,
+            json.dumps(provenance_json) if provenance_json is not None else None,
+            json.dumps(meta) if meta is not None else None,
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def list_message_blocks(
+    con: sqlite3.Connection,
+    message_id: Optional[str] = None,
+    canonical_thread_id: Optional[str] = None,
+) -> list[dict]:
+    sql = """
+        SELECT block_id, message_id, canonical_thread_id, block_index, block_type, text,
+               source_path, source_bucket, provenance_json, meta
+        FROM message_blocks
+    """
+    conditions: list[str] = []
+    params: list = []
+    if message_id is not None:
+        conditions.append("message_id = ?")
+        params.append(message_id)
+    if canonical_thread_id is not None:
+        conditions.append("canonical_thread_id = ?")
+        params.append(canonical_thread_id)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY message_id, block_index"
+    rows = con.execute(sql, params).fetchall()
+    return [
+        {
+            "block_id": row[0],
+            "message_id": row[1],
+            "canonical_thread_id": row[2],
+            "block_index": row[3],
+            "block_type": row[4],
+            "text": row[5],
+            "source_path": row[6],
+            "source_bucket": row[7],
+            "provenance_json": json.loads(row[8]) if row[8] else None,
+            "meta": json.loads(row[9]) if row[9] else None,
+        }
+        for row in rows
+    ]
+
+
+def insert_provenance_ref(
+    con: sqlite3.Connection,
+    provenance_ref_id: str,
+    message_id: Optional[str],
+    block_id: Optional[str],
+    ref_index: int,
+    source_id: Optional[str] = None,
+    source_thread_id: Optional[str] = None,
+    source_message_id: Optional[str] = None,
+    source_path: Optional[str] = None,
+    source_bucket: Optional[str] = None,
+    locator_json: Optional[dict] = None,
+    meta: Optional[dict] = None,
+) -> bool:
+    """Insert a provenance reference row. Returns False if duplicate provenance_ref_id."""
+    cur = con.execute(
+        """
+        INSERT OR IGNORE INTO provenance_refs
+            (provenance_ref_id, message_id, block_id, ref_index, source_id,
+             source_thread_id, source_message_id, source_path, source_bucket,
+             locator_json, meta)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            provenance_ref_id,
+            message_id,
+            block_id,
+            ref_index,
+            source_id,
+            source_thread_id,
+            source_message_id,
+            source_path,
+            source_bucket,
+            json.dumps(locator_json) if locator_json is not None else None,
+            json.dumps(meta) if meta is not None else None,
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def list_provenance_refs(
+    con: sqlite3.Connection,
+    message_id: Optional[str] = None,
+    block_id: Optional[str] = None,
+) -> list[dict]:
+    sql = """
+        SELECT provenance_ref_id, message_id, block_id, ref_index, source_id,
+               source_thread_id, source_message_id, source_path, source_bucket,
+               locator_json, meta
+        FROM provenance_refs
+    """
+    conditions: list[str] = []
+    params: list = []
+    if message_id is not None:
+        conditions.append("message_id = ?")
+        params.append(message_id)
+    if block_id is not None:
+        conditions.append("block_id = ?")
+        params.append(block_id)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY message_id, block_id, ref_index"
+    rows = con.execute(sql, params).fetchall()
+    return [
+        {
+            "provenance_ref_id": row[0],
+            "message_id": row[1],
+            "block_id": row[2],
+            "ref_index": row[3],
+            "source_id": row[4],
+            "source_thread_id": row[5],
+            "source_message_id": row[6],
+            "source_path": row[7],
+            "source_bucket": row[8],
+            "locator_json": json.loads(row[9]) if row[9] else None,
+            "meta": json.loads(row[10]) if row[10] else None,
+        }
+        for row in rows
+    ]
+
+
+def insert_predicate_projection(
+    con: sqlite3.Connection,
+    message_id: str,
+    canonical_thread_id: str,
+    projection: Mapping[str, Any],
+) -> int:
+    """Replace predicate projection rows for one message. Returns predicate count inserted."""
+    predicates = projection.get("predicates")
+    if not isinstance(predicates, list):
+        return 0
+
+    con.execute("DELETE FROM predicate_roles WHERE message_id = ?", (message_id,))
+    con.execute("DELETE FROM predicate_refs WHERE message_id = ?", (message_id,))
+
+    inserted = 0
+    for pred_index, predicate in enumerate(predicates):
+        if not isinstance(predicate, Mapping):
+            continue
+        predicate_ref = str(predicate.get("ref") or f"pred:{pred_index}")
+        predicate_ref_id = f"{message_id}:{predicate_ref}"
+        con.execute(
+            """
+            INSERT OR REPLACE INTO predicate_refs
+                (predicate_ref_id, message_id, canonical_thread_id, predicate_ref, atom_id,
+                 predicate, structural_signature, polarity, modality, domain, wrapper_status,
+                 evidence_only, source_spans_json, provenance_refs_json, meta)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                predicate_ref_id,
+                message_id,
+                canonical_thread_id,
+                predicate_ref,
+                predicate.get("atom_id"),
+                str(predicate.get("predicate") or ""),
+                str(predicate.get("structural_signature") or "") or None,
+                str(predicate.get("polarity") or "") or None,
+                str(predicate.get("modality") or "") or None,
+                str(predicate.get("domain") or "") or None,
+                str((predicate.get("wrapper") or {}).get("status") or "") or None,
+                1 if bool((predicate.get("wrapper") or {}).get("evidence_only", True)) else 0,
+                json.dumps(predicate.get("source_spans")) if predicate.get("source_spans") is not None else None,
+                json.dumps(predicate.get("provenance_refs")) if predicate.get("provenance_refs") is not None else None,
+                json.dumps(
+                    {
+                        "version": projection.get("version"),
+                        "limits": projection.get("limits"),
+                        "counts": projection.get("counts"),
+                    }
+                ),
+            ),
+        )
+        roles = predicate.get("roles")
+        if isinstance(roles, list):
+            for role_index, role in enumerate(roles):
+                if not isinstance(role, Mapping):
+                    continue
+                role_name = str(role.get("name") or "")
+                role_value = str(role.get("value") or "")
+                if not role_name or not role_value:
+                    continue
+                predicate_role_id = f"{predicate_ref_id}:role:{role_index}"
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO predicate_roles
+                        (predicate_role_id, predicate_ref_id, message_id, role_name, role_value,
+                         role_status, entity_type, cardinality, members_json, provenance_refs_json, meta)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        predicate_role_id,
+                        predicate_ref_id,
+                        message_id,
+                        role_name,
+                        role_value,
+                        str(role.get("status") or "") or None,
+                        str(role.get("entity_type") or "") or None,
+                        str(role.get("cardinality") or "") or None,
+                        json.dumps(role.get("members")) if role.get("members") is not None else None,
+                        json.dumps(role.get("provenance_refs")) if role.get("provenance_refs") is not None else None,
+                        json.dumps({}),
+                    ),
+                )
+        inserted += 1
+    return inserted
+
+
+def list_predicate_refs(
+    con: sqlite3.Connection,
+    message_id: Optional[str] = None,
+    canonical_thread_id: Optional[str] = None,
+) -> list[dict]:
+    sql = """
+        SELECT predicate_ref_id, message_id, canonical_thread_id, predicate_ref, atom_id,
+               predicate, structural_signature, polarity, modality, domain, wrapper_status,
+               evidence_only, source_spans_json, provenance_refs_json, meta
+        FROM predicate_refs
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    if message_id is not None:
+        conditions.append("message_id = ?")
+        params.append(message_id)
+    if canonical_thread_id is not None:
+        conditions.append("canonical_thread_id = ?")
+        params.append(canonical_thread_id)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY message_id, predicate_ref"
+    rows = con.execute(sql, params).fetchall()
+    return [
+        {
+            "predicate_ref_id": row[0],
+            "message_id": row[1],
+            "canonical_thread_id": row[2],
+            "predicate_ref": row[3],
+            "atom_id": row[4],
+            "predicate": row[5],
+            "structural_signature": row[6],
+            "polarity": row[7],
+            "modality": row[8],
+            "domain": row[9],
+            "wrapper_status": row[10],
+            "evidence_only": bool(row[11]),
+            "source_spans": json.loads(row[12]) if row[12] else None,
+            "provenance_refs": json.loads(row[13]) if row[13] else None,
+            "meta": json.loads(row[14]) if row[14] else None,
+        }
+        for row in rows
+    ]
+
+
+def list_predicate_roles(
+    con: sqlite3.Connection,
+    predicate_ref_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> list[dict]:
+    sql = """
+        SELECT predicate_role_id, predicate_ref_id, message_id, role_name, role_value,
+               role_status, entity_type, cardinality, members_json, provenance_refs_json, meta
+        FROM predicate_roles
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    if predicate_ref_id is not None:
+        conditions.append("predicate_ref_id = ?")
+        params.append(predicate_ref_id)
+    if message_id is not None:
+        conditions.append("message_id = ?")
+        params.append(message_id)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY predicate_ref_id, role_name, role_value"
+    rows = con.execute(sql, params).fetchall()
+    return [
+        {
+            "predicate_role_id": row[0],
+            "predicate_ref_id": row[1],
+            "message_id": row[2],
+            "role_name": row[3],
+            "role_value": row[4],
+            "role_status": row[5],
+            "entity_type": row[6],
+            "cardinality": row[7],
+            "members": json.loads(row[8]) if row[8] else None,
+            "provenance_refs": json.loads(row[9]) if row[9] else None,
+            "meta": json.loads(row[10]) if row[10] else None,
+        }
+        for row in rows
+    ]
+
+
+def search_predicate_candidates(
+    con: sqlite3.Connection,
+    structural_signatures: list[str],
+    role_arguments: list[str] | None = None,
+    *,
+    limit: int = 20,
+    platform: str | list[str] | None = None,
+    cutoff_iso: str | None = None,
+    group_thread_ids: set[str] | None = None,
+) -> list[dict]:
+    """Return predicate-first message candidates with representative chunks."""
+    if group_thread_ids is not None and not group_thread_ids:
+        return []
+
+    normalized_signatures = sorted({str(sig).strip() for sig in structural_signatures if str(sig).strip()})
+    normalized_role_args = sorted({str(arg).strip() for arg in (role_arguments or []) if str(arg).strip()})
+    if not normalized_signatures and not normalized_role_args:
+        return []
+
+    message_filters = _predicate_message_filter_sql(platform, cutoff_iso, group_thread_ids)
+
+    candidates: dict[str, dict[str, Any]] = {}
+    if normalized_signatures:
+        placeholders = ",".join("?" * len(normalized_signatures))
+        rows = con.execute(
+            f"""
+            SELECT pr.message_id, pr.canonical_thread_id, pr.structural_signature
+            FROM predicate_refs pr
+            JOIN messages m ON pr.message_id = m.message_id
+            WHERE pr.structural_signature IN ({placeholders}) {message_filters['sql']}
+            """,
+            [*normalized_signatures, *message_filters["params"]],
+        ).fetchall()
+        for message_id, canonical_thread_id, structural_signature in rows:
+            if not message_id:
+                continue
+            candidate = candidates.setdefault(
+                message_id,
+                {
+                    "message_id": message_id,
+                    "canonical_thread_id": canonical_thread_id,
+                    "matched_signatures": set(),
+                    "matched_role_arguments": set(),
+                },
+            )
+            if structural_signature:
+                candidate["matched_signatures"].add(structural_signature)
+
+    if normalized_role_args:
+        role_pairs = [
+            tuple(arg.split("|", 1))
+            for arg in normalized_role_args
+            if "|" in arg and all(part.strip() for part in arg.split("|", 1))
+        ]
+        if role_pairs:
+            clause = " OR ".join("(prr.role_name = ? AND prr.role_value = ?)" for _ in role_pairs)
+            rows = con.execute(
+                f"""
+                SELECT prr.message_id, pr.canonical_thread_id, prr.role_name, prr.role_value
+                FROM predicate_roles prr
+                JOIN predicate_refs pr ON prr.predicate_ref_id = pr.predicate_ref_id
+                JOIN messages m ON prr.message_id = m.message_id
+                WHERE ({clause}) {message_filters['sql']}
+                """,
+                [value for pair in role_pairs for value in pair] + message_filters["params"],
+            ).fetchall()
+            for message_id, canonical_thread_id, role_name, role_value in rows:
+                if not message_id:
+                    continue
+                candidate = candidates.setdefault(
+                    message_id,
+                    {
+                        "message_id": message_id,
+                        "canonical_thread_id": canonical_thread_id,
+                        "matched_signatures": set(),
+                        "matched_role_arguments": set(),
+                    },
+                )
+                if role_name and role_value:
+                    candidate["matched_role_arguments"].add(f"{role_name}|{role_value}")
+
+    if not candidates:
+        return []
+
+    rep_rows = _representative_chunks_for_messages(con, list(candidates))
+    rep_by_message = {row["message_id"]: row for row in rep_rows}
+
+    total_sigs = len(normalized_signatures)
+    total_roles = len(normalized_role_args)
+    scored: list[dict] = []
+    for candidate in candidates.values():
+        rep = rep_by_message.get(candidate["message_id"])
+        if not rep:
+            continue
+        matched_signatures = sorted(candidate["matched_signatures"])
+        matched_role_arguments = sorted(candidate["matched_role_arguments"])
+        signature_score = (len(matched_signatures) / total_sigs) if total_sigs else 0.0
+        role_score = (len(matched_role_arguments) / total_roles) if total_roles else 0.0
+        predicate_score = min(1.0, (signature_score * 0.8) + (role_score * 0.2))
+        scored.append(
+            {
+                "message_id": candidate["message_id"],
+                "canonical_thread_id": candidate["canonical_thread_id"],
+                "chunk_id": rep["chunk_id"],
+                "timestamp": rep["ts_start"],
+                "predicate_score": round(predicate_score, 4),
+                "matched_signatures": matched_signatures,
+                "matched_role_arguments": matched_role_arguments,
+            }
+        )
+
+    scored.sort(
+        key=lambda item: (item["predicate_score"], len(item["matched_role_arguments"]), item["timestamp"] or ""),
+        reverse=True,
+    )
+    return scored[:limit]
+
+
+def _predicate_message_filter_sql(
+    platform: str | list[str] | None,
+    cutoff_iso: str | None,
+    group_thread_ids: set[str] | None,
+) -> dict[str, Any]:
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    if platform:
+        platforms = [platform] if isinstance(platform, str) else platform
+        placeholders = ",".join("?" * len(platforms))
+        conditions.append(f"m.platform IN ({placeholders})")
+        params.extend(platforms)
+    if cutoff_iso:
+        conditions.append("m.ts >= ?")
+        params.append(cutoff_iso)
+    if group_thread_ids:
+        placeholders = ",".join("?" * len(group_thread_ids))
+        conditions.append(f"m.canonical_thread_id IN ({placeholders})")
+        params.extend(group_thread_ids)
+
+    if not conditions:
+        return {"sql": "", "params": params}
+    return {"sql": " AND " + " AND ".join(conditions), "params": params}
+
+
+def _representative_chunks_for_messages(
+    con: sqlite3.Connection,
+    message_ids: list[str],
+) -> list[dict]:
+    if not message_ids:
+        return []
+    placeholders = ",".join("?" * len(message_ids))
+    rows = con.execute(
+        f"""
+        SELECT c.message_id, c.chunk_id, c.ts_start
+        FROM chunks c
+        JOIN (
+            SELECT message_id, MIN(chunk_index) AS min_chunk_index
+            FROM chunks
+            WHERE message_id IN ({placeholders})
+            GROUP BY message_id
+        ) first_chunk
+          ON c.message_id = first_chunk.message_id
+         AND c.chunk_index = first_chunk.min_chunk_index
+        """,
+        message_ids,
+    ).fetchall()
+    return [
+        {"message_id": row[0], "chunk_id": row[1], "ts_start": row[2]}
+        for row in rows
     ]
 
 

@@ -18,6 +18,9 @@ from mcp.server.fastmcp import FastMCP
 
 from mychatarchive import db
 from mychatarchive.config import get_db_path
+from mychatarchive.itir import enrich_text as enrich_text_with_itir
+from mychatarchive.itir_residuals import extract_projection_terms
+from mychatarchive.retrieval_explain import build_provenance_ranked_chunk_results
 
 # Quiet MCP SDK INFO logs (they go to stderr and show as [error] in Cursor's MCP panel)
 logging.getLogger("mcp").setLevel(logging.WARNING)
@@ -145,6 +148,113 @@ def search_brain(
             })
 
     out = {"query": query, "count": len(output), "results": output, **_current_datetime_json()}
+    return json.dumps(out, indent=2)
+
+
+@mcp.tool()
+def search_brain_governed(
+    query: str,
+    limit: int = 10,
+    platform: str | None = None,
+    hours_back: int | None = None,
+    since: str | None = None,
+    sort_by_time: bool = False,
+    group: str | None = None,
+    rerank_by_governance: bool = True,
+    governance_weight: float = 0.30,
+) -> str:
+    """Semantic retrieval with provenance/governance-aware explanation and ranking.
+
+    Starts from semantic vector candidates, then computes governance signals from
+    provenance lineage, source metadata, structured blocks/refs, and ITIR metadata.
+
+    Args:
+        query: Natural-language query for semantic retrieval
+        limit: Maximum number of results to return
+        platform: Optional platform filter (comma-separated values supported)
+        hours_back: Only include messages from the last N hours
+        since: Only include messages from this date (YYYY-MM-DD)
+        sort_by_time: If true, semantic candidate set is first sorted by time
+        group: Filter to a user-curated thread group
+        rerank_by_governance: If true, blend semantic + governance scores for ranking
+        governance_weight: Blend weight for governance in [0, 1] (default 0.30)
+    """
+    con = _get_con()
+    embedding = _lazy_embed(query)
+    platforms = [p.strip() for p in platform.split(",")] if platform else None
+    group_thread_ids = _resolve_group_thread_ids(con, group)
+
+    cutoff_iso = None
+    if hours_back is not None:
+        cutoff_iso = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=hours_back)
+        ).isoformat()
+    elif since:
+        try:
+            dt = datetime.datetime.strptime(since, "%Y-%m-%d")
+            cutoff_iso = dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        except ValueError:
+            return json.dumps({"error": "Invalid since format. Use YYYY-MM-DD."})
+
+    candidate_limit = max(limit * 4, limit)
+    candidate_matches = db.search_chunks(
+        con,
+        embedding,
+        limit=candidate_limit,
+        platform=platforms,
+        cutoff_iso=cutoff_iso,
+        sort_by_time=sort_by_time,
+        group_thread_ids=group_thread_ids,
+    )
+
+    query_projection = None
+    predicate_candidates = []
+    try:
+        query_itir = enrich_text_with_itir(query)
+        if isinstance(query_itir, dict):
+            query_projection = query_itir.get("predicate_projection")
+    except Exception:
+        query_projection = None
+
+    if query_projection:
+        projection_terms = extract_projection_terms(query_projection)
+        predicate_candidates = db.search_predicate_candidates(
+            con,
+            projection_terms["signatures"],
+            projection_terms["role_arguments"],
+            limit=candidate_limit,
+            platform=platforms,
+            cutoff_iso=cutoff_iso,
+            group_thread_ids=group_thread_ids,
+        )
+
+    if not candidate_matches and not predicate_candidates:
+        out = {"query": query, "count": 0, "results": [], **_current_datetime_json()}
+        return json.dumps(out, indent=2)
+
+    results = build_provenance_ranked_chunk_results(
+        con,
+        candidate_matches,
+        limit=limit,
+        governance_weight=governance_weight,
+        rerank_by_governance=rerank_by_governance,
+        query_projection=query_projection,
+        predicate_candidates=predicate_candidates,
+    )
+
+    out = {
+        "query": query,
+        "count": len(results),
+        "scoring": {
+            "rerank_by_governance": rerank_by_governance,
+            "governance_weight": max(0.0, min(1.0, governance_weight)),
+            "semantic_weight": 1.0 - max(0.0, min(1.0, governance_weight)),
+            "predicate_candidates": len(predicate_candidates),
+        },
+        "results": results,
+        **_current_datetime_json(),
+    }
     return json.dumps(out, indent=2)
 
 
