@@ -1,0 +1,15 @@
+name: mychatarchive
+version: 0.1.0
+description: Cross-platform chat archive memory via MyChatArchive (local SQLite + vector search)
+hooks:
+  - name
+  - is_available
+  - initialize
+  - system_prompt_block
+  - prefetch
+  - sync_turn
+  - get_tool_schemas
+  - handle_tool_call
+  - get_config_schema
+  - save_config
+  - shutdown
