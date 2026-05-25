@@ -101,7 +101,7 @@ def mock_mca(tmp_path):
         original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
 
         # Import the plugin module fresh
-        plugin_dir = Path(__file__).parent.parent / "hermes-plugin" / "plugins" / "memory" / "mychatarchive"
+        plugin_dir = Path(__file__).parent.parent / "integrations" / "hermes"
         spec = __import__("importlib").util.spec_from_file_location(
             "plugins.memory.mychatarchive",
             str(plugin_dir / "__init__.py"),
@@ -453,7 +453,7 @@ class TestProfileIsolation:
         }))
 
         # Import the config loader
-        plugin_dir = Path(__file__).parent.parent / "hermes-plugin" / "plugins" / "memory" / "mychatarchive"
+        plugin_dir = Path(__file__).parent.parent / "integrations" / "hermes"
         sys.path.insert(0, str(plugin_dir.parent.parent.parent))
 
         # We can test the config loading directly

@@ -191,28 +191,23 @@ def _parse_meta(meta_json: Any) -> dict:
 
 
 def _load_plugin_config_from_hermes() -> dict:
-    """Load config by scanning known Hermes home locations.
+    """Load config from the active Hermes home directory.
 
-    Checks HERMES_HOME env, hermes_constants.get_hermes_home(), and the
-    common Windows AppData location as a fallback.
+    Resolution: HERMES_HOME env var, then hermes_constants.get_hermes_home().
     """
     import os
-    candidates: List[str] = []
-    env_home = os.environ.get("HERMES_HOME", "")
+    env_home = os.environ.get("HERMES_HOME", "").strip()
     if env_home:
-        candidates.append(env_home)
-    try:
-        from hermes_constants import get_hermes_home
-        candidates.append(str(get_hermes_home()))
-    except Exception:
-        pass
-    appdata = os.environ.get("LOCALAPPDATA", "")
-    if appdata:
-        candidates.append(str(Path(appdata) / "hermes"))
-    for c in candidates:
-        cfg = _load_plugin_config(c)
+        cfg = _load_plugin_config(env_home)
         if cfg:
             return cfg
+    try:
+        from hermes_constants import get_hermes_home
+        cfg = _load_plugin_config(str(get_hermes_home()))
+        if cfg:
+            return cfg
+    except Exception:
+        pass
     return {}
 
 
@@ -325,6 +320,102 @@ class MyChatArchiveProvider(MemoryProvider):
             json.dumps(existing, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    def post_setup(self, hermes_home: str, config: dict) -> None:
+        """Interactive setup wizard with dependency installation."""
+        import shutil
+        import subprocess
+        import sys
+
+        from hermes_cli.config import save_config
+
+        print("\n  Configuring MyChatArchive memory:\n")
+
+        # Step 1: install mychatarchive if missing
+        try:
+            importlib.import_module("mychatarchive")
+            print("  mychatarchive package: installed")
+        except ImportError:
+            print("  mychatarchive package: not installed")
+            print("  Installing from GitHub...\n")
+            uv_path = shutil.which("uv")
+            pip_cmd = (
+                [uv_path, "pip", "install", "--python", sys.executable, "--quiet"]
+                if uv_path
+                else [sys.executable, "-m", "pip", "install", "--quiet"]
+            )
+            try:
+                subprocess.run(
+                    pip_cmd + ["mychatarchive"],
+                    check=True, timeout=120, capture_output=True,
+                )
+                print("  mychatarchive installed successfully")
+            except Exception as exc:
+                print(f"  Install failed: {exc}")
+                print("  Run manually: pip install git+https://github.com/1ch1n/mychatarchive\n")
+                return
+
+        # Step 2: resolve DB path
+        try:
+            from mychatarchive.config import get_db_path
+            default_db = str(get_db_path())
+        except Exception:
+            default_db = "~/.mychatarchive/archive.db"
+
+        sys.stdout.write(f"  Database path [{default_db}]: ")
+        sys.stdout.flush()
+        db_input = sys.stdin.readline().strip()
+        db_path = db_input or default_db
+
+        # Step 3: recall mode
+        print("\n  Recall mode:")
+        print("    hybrid  -- auto-injected context + tools (default)")
+        print("    context -- auto-injected context only, tools hidden")
+        print("    tools   -- tools only, no auto-injection")
+        sys.stdout.write("  Recall mode [hybrid]: ")
+        sys.stdout.flush()
+        mode_input = sys.stdin.readline().strip()
+        recall_mode = mode_input if mode_input in ("hybrid", "context", "tools") else "hybrid"
+
+        # Step 4: prefetch limit
+        sys.stdout.write("  Max chunks per turn [5]: ")
+        sys.stdout.flush()
+        limit_input = sys.stdin.readline().strip()
+        try:
+            prefetch_limit = int(limit_input) if limit_input else 5
+        except ValueError:
+            prefetch_limit = 5
+
+        # Step 5: save config
+        provider_config = {
+            "db_path": db_path,
+            "recall_mode": recall_mode,
+            "prefetch_limit": str(prefetch_limit),
+        }
+        self.save_config(provider_config, hermes_home)
+
+        config.setdefault("memory", {})["provider"] = "mychatarchive"
+        save_config(config)
+
+        # Step 6: verify DB exists
+        resolved = Path(db_path).expanduser()
+        if resolved.exists():
+            try:
+                from mychatarchive import db
+                con = db.get_connection(resolved)
+                msgs = db.message_count(con)
+                chunks = db.chunk_count(con)
+                con.close()
+                print(f"\n  Database: {resolved}")
+                print(f"  Messages: {msgs:,}, Chunks: {chunks:,}")
+            except Exception as exc:
+                print(f"\n  Database found but could not read: {exc}")
+        else:
+            print(f"\n  Database not found at {resolved}")
+            print("  Run: mychatarchive sync && mychatarchive embed")
+
+        print(f"\n  Memory provider set to 'mychatarchive'")
+        print("  Start a new session to activate.\n")
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         """Open DB connection and load the embedding model.

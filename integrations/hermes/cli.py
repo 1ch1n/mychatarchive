@@ -17,12 +17,11 @@ def _hermes_home() -> str:
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
         return val
-    appdata = os.environ.get("LOCALAPPDATA", "")
-    if appdata:
-        candidate = str(Path(appdata) / "hermes")
-        if Path(candidate).is_dir():
-            return candidate
-    return str(Path.home() / ".hermes")
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home())
+    except Exception:
+        return str(Path.home() / ".hermes")
 
 
 def _load_config() -> dict:
