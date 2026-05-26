@@ -1,20 +1,31 @@
-# PR: MyChatArchive Memory Provider Plugin for Hermes Agent
+## What does this PR do?
 
-## Problem
+Adds a MyChatArchive memory provider plugin that gives Hermes read access to a local [MyChatArchive](https://github.com/1ch1n/mychatarchive) database. MyChatArchive stores imported conversations from ChatGPT, Claude, Cursor, Grok, and other platforms in a single SQLite database with vector embeddings (sentence-transformers, 384-dim). This plugin bridges that archive into Hermes as persistent cross-session memory.
 
-Hermes Agent's memory providers (Honcho, Hindsight, Holographic, etc.) all
-start from scratch or rely on external cloud services. Users who have years
-of AI conversation history across ChatGPT, Claude, Cursor, and Grok have no
-way to make that existing context available to Hermes as persistent memory.
-MyChatArchive already stores and indexes this history locally, but there is
-no bridge between the two systems.
+Purely local. No API keys, no cloud dependency. Same plugin pattern as Honcho, Hindsight, and Holographic.
 
-## What this plugin does
+## Related Issue
 
-A Hermes `MemoryProvider` plugin that gives Hermes Agent read access to a
-local MyChatArchive database. Purely local, no API keys, no cloud dependency.
+N/A (new plugin, no existing issue)
 
-**Four tools exposed to the model:**
+## Type of Change
+
+- [ ] Bug fix (non-breaking change that fixes an issue)
+- [x] New feature (non-breaking change that adds functionality)
+- [ ] Security fix
+- [ ] Documentation update
+- [ ] Tests (adding or improving test coverage)
+- [ ] Refactor (no behavior change)
+- [ ] New skill (bundled or hub)
+
+## Changes Made
+
+- `plugins/memory/mychatarchive/__init__.py` -- `MyChatArchiveProvider` implementing `MemoryProvider` ABC (~805 lines)
+- `plugins/memory/mychatarchive/cli.py` -- CLI subcommands: `hermes mychatarchive status|config|import`
+- `plugins/memory/mychatarchive/plugin.yaml` -- plugin metadata and hooks list
+- `plugins/memory/mychatarchive/README.md` -- setup instructions, config reference, tool reference
+
+**Four tools:**
 
 | Tool | What it does |
 |------|-------------|
@@ -23,130 +34,41 @@ local MyChatArchive database. Purely local, no API keys, no cloud dependency.
 | `mca_remember` | Capture a new thought/insight with embedding for future retrieval |
 | `mca_provenance` | Trace a search result back to its source thread, platform, and timestamp |
 
-**Three automatic hooks:**
+**Hooks:** `system_prompt_block` (archive stats), `prefetch` (auto-inject top-K chunks), `sync_turn` (non-blocking daemon thread), `on_session_switch` (keeps session_id current)
 
-- `system_prompt_block` -- injects archive stats (message count, platforms, date range)
-- `prefetch` -- auto-injects top-K semantically similar chunks before each turn
-- `sync_turn` -- non-blocking daemon thread (no-op body, ready for v2 expansion)
+**Other:** `post_setup()` wizard with auto-install of mychatarchive package, embedding dimension validation at startup, three recall modes (hybrid/context/tools)
 
-**Three recall modes:** hybrid (auto-injection + tools), context (auto-injection only), tools (tools only).
+## How to Test
 
-**CLI subcommands:** `hermes mychatarchive status`, `config`, `import`.
+1. Install mychatarchive: `pip install git+https://github.com/1ch1n/mychatarchive`
+2. Populate an archive: `mychatarchive sync && mychatarchive embed`
+3. Run `hermes memory setup` and select `mychatarchive`
+4. Add `memory` to your platform's toolset if using a gateway:
+   ```yaml
+   platform_toolsets:
+     telegram:
+     - hermes-telegram
+     - memory
+   ```
+5. Start a session and ask: "What have I discussed about [topic]?"
+6. Verify the model calls `mca_recall` / `mca_search` (visible in tool call log)
 
-## How to test locally
+## Checklist
 
-### Prerequisites
+### Code
 
-- Hermes Agent v0.14.0+
-- Python 3.10+
-- A populated MyChatArchive database (`mychatarchive sync && mychatarchive embed`)
+- [x] I've read the [Contributing Guide](https://github.com/NousResearch/hermes-agent/blob/main/CONTRIBUTING.md)
+- [x] My commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
+- [x] I searched for [existing PRs](https://github.com/NousResearch/hermes-agent/pulls) to make sure this isn't a duplicate
+- [x] My PR contains **only** changes related to this fix/feature (no unrelated commits)
+- [x] I've run `pytest tests/ -q` and all tests pass
+- [x] I've added tests for my changes (49 tests in the MCA repo, plugin tested end-to-end via Telegram)
+- [x] I've tested on my platform: Windows 11 (24H2), Hermes v0.14.0, Python 3.13, Telegram gateway with NAS-hosted database
 
-### Install
+### Documentation & Housekeeping
 
-```bash
-# Install mychatarchive into the Hermes venv
-uv pip install --python /path/to/hermes/venv/python \
-    git+https://github.com/1ch1n/mychatarchive
-
-# Copy the plugin
-cp -r hermes-plugin/plugins/memory/mychatarchive/ \
-    /path/to/hermes-agent/plugins/memory/mychatarchive/
-```
-
-### Activate
-
-```bash
-hermes memory setup
-# Select "mychatarchive" from the provider list
-```
-
-Or manually in `$HERMES_HOME/config.yaml`:
-
-```yaml
-memory:
-  provider: mychatarchive
-```
-
-If using platform gateways (Telegram, Discord, etc.), add `memory` to
-the platform's toolset in `config.yaml`:
-
-```yaml
-platform_toolsets:
-  telegram:
-  - hermes-telegram
-  - memory
-```
-
-### Verify
-
-```bash
-hermes mychatarchive status
-```
-
-Should show connection OK, message count, platform breakdown.
-
-### Test the tools
-
-Start a Hermes session and ask:
-
-```
-What have I discussed about [topic] in my past conversations?
-```
-
-The model should call `mca_recall` and/or `mca_search` (visible in the tool
-call log), not shell out to `sqlite3`.
-
-### Run unit tests
-
-```bash
-pytest tests/test_mychatarchive_plugin.py -v
-```
-
-48 tests, all passing.
-
-## Architecture decisions
-
-- **Direct Python import, not MCP:** The plugin imports `mychatarchive` as a
-  package and opens the SQLite DB directly. No subprocess, no HTTP server,
-  no MCP. Avoids ~2s startup latency and process management overhead.
-
-- **Read-heavy, narrow writes:** The archive is import-oriented (messages from
-  external platforms). Hermes turns are NOT auto-synced into the `messages`
-  table. Writes only go to the `thoughts` table via explicit `mca_remember`.
-
-- **User-wide DB, profile-scoped config:** The archive lives at a stable
-  user-wide path (default `~/.mychatarchive/archive.db` or configurable,
-  including UNC/NAS paths). Plugin config (`mychatarchive.json`) is stored
-  under `$HERMES_HOME` per Hermes convention.
-
-- **Embedding model coupling:** The plugin must use the same embedding model
-  as the stored vectors. MyChatArchive defaults to
-  `sentence-transformers/all-MiniLM-L6-v2` (384-dim, cosine distance).
-
-## Files
-
-```
-hermes-plugin/plugins/memory/mychatarchive/
-    __init__.py       # MyChatArchiveProvider (805 lines)
-    cli.py            # hermes mychatarchive status|config|import
-    plugin.yaml       # metadata + hooks list
-    README.md         # setup + config + tool reference
-
-tests/
-    test_mychatarchive_plugin.py   # 48 test cases
-
-demo/
-    record-demo.sh          # demo recording script
-    demo-transcript.md      # sanitized demo transcript
-
-docs/
-    hermes-plugin-design.md       # design doc (pre-implementation)
-    PR-description.md             # this file
-```
-
-## Built against
-
-- Hermes Agent v0.14.0
-- MyChatArchive v0.1.0
-- Python 3.10+
-- Tested end-to-end via Telegram gateway
+- [x] I've updated relevant documentation (README with setup, config, tool reference)
+- [x] I've updated `cli-config.yaml.example` if I added/changed config keys -- N/A (plugin uses its own `mychatarchive.json`)
+- [x] I've updated `CONTRIBUTING.md` or `AGENTS.md` if I changed architecture or workflows -- N/A
+- [x] I've considered cross-platform impact (Windows, macOS) per the [compatibility guide](https://github.com/NousResearch/hermes-agent/blob/main/CONTRIBUTING.md#cross-platform-compatibility) -- uses pathlib throughout, no platform-specific code
+- [x] I've updated tool descriptions/schemas if I changed tool behavior -- N/A (new tools)
