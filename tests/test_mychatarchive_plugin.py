@@ -619,3 +619,60 @@ class TestSearchModes:
         # The group_thread_ids may come from the mock db module loaded at
         # call time; verify it was passed (not None)
         assert group_ids is not None, "group_thread_ids should be set when group filter is used"
+
+
+# ---------------------------------------------------------------------------
+# Embedding dimension validation
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingDimensionCheck:
+    def test_mismatch_raises_runtime_error(self):
+        """Dimension mismatch between stored vectors and current model raises at init."""
+        plugin_dir = Path(__file__).parent.parent / "integrations" / "hermes"
+        spec = __import__("importlib").util.spec_from_file_location(
+            "_mca_dim_test", str(plugin_dir / "__init__.py"),
+        )
+        mod = __import__("importlib").util.module_from_spec(spec)
+        # Provide minimal mocks so the module loads
+        sys.modules.setdefault("agent", MagicMock())
+        sys.modules.setdefault("agent.memory_provider", MagicMock())
+        sys.modules.setdefault("tools", MagicMock())
+        sys.modules.setdefault("tools.registry", MagicMock())
+        from abc import ABC, abstractmethod
+
+        class _FakeABC(ABC):
+            @property
+            @abstractmethod
+            def name(self): ...
+            @abstractmethod
+            def is_available(self): ...
+            @abstractmethod
+            def initialize(self, session_id, **kwargs): ...
+            @abstractmethod
+            def get_tool_schemas(self): ...
+            def handle_tool_call(self, tool_name, args, **kwargs):
+                raise NotImplementedError
+            def system_prompt_block(self): return ""
+            def prefetch(self, query, *, session_id=""): return ""
+            def sync_turn(self, u, a, *, session_id=""): pass
+            def shutdown(self): pass
+            def get_config_schema(self): return []
+            def save_config(self, v, h): pass
+
+        sys.modules["agent.memory_provider"].MemoryProvider = _FakeABC
+        sys.modules["tools.registry"].tool_error = lambda msg, **kw: json.dumps({"error": msg})
+        spec.loader.exec_module(mod)
+
+        # Mock a connection that reports 384-dim in its vec_chunks table
+        mock_con = MagicMock()
+        mock_con.execute.return_value.fetchone.return_value = (
+            "CREATE VIRTUAL TABLE vec_chunks USING vec0(chunk_id TEXT PRIMARY KEY, embedding float[384] distance_metric=cosine)",
+        )
+
+        # Should pass when dimensions match
+        mod._validate_embedding_dimension(mock_con, 384)
+
+        # Should raise when dimensions differ
+        with pytest.raises(RuntimeError, match="Embedding dimension mismatch"):
+            mod._validate_embedding_dimension(mock_con, 768)
