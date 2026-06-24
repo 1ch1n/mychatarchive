@@ -293,7 +293,7 @@ def main():
         _cmd_sources(args)
         return
 
-    db_path = args.db or get_db_path()
+    db_path = getattr(args, "db", None) or get_db_path()
 
     if args.command == "sync":
         _cmd_sync(args, db_path)
