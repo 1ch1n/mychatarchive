@@ -180,11 +180,13 @@ def main():
     )
     groups_sub = groups_p.add_subparsers(dest="groups_command")
 
-    groups_sub.add_parser("list", help="List all groups with thread counts")
+    groups_list = groups_sub.add_parser("list", help="List all groups with thread counts")
+    _add_db_arg(groups_list)
 
     groups_create = groups_sub.add_parser("create", help="Create a new group")
     groups_create.add_argument("name", help="Group name (slug, e.g. 'jarvis', 'coding')")
     groups_create.add_argument("--description", default=None, help="Optional description")
+    _add_db_arg(groups_create)
 
     groups_add = groups_sub.add_parser("add", help="Add threads to a group")
     groups_add.add_argument("group", help="Group name")
@@ -194,17 +196,21 @@ def main():
         metavar="THREAD_ID",
         help="canonical_thread_id(s) to add (use 'mychatarchive groups show <group>' to find IDs)",
     )
+    _add_db_arg(groups_add)
 
     groups_remove = groups_sub.add_parser("remove", help="Remove threads from a group")
     groups_remove.add_argument("group", help="Group name")
     groups_remove.add_argument("thread_ids", nargs="+", metavar="THREAD_ID")
+    _add_db_arg(groups_remove)
 
     groups_delete = groups_sub.add_parser("delete", help="Delete a group (threads are not deleted)")
     groups_delete.add_argument("name", help="Group name to delete")
+    _add_db_arg(groups_delete)
 
     groups_show = groups_sub.add_parser("show", help="Show threads in a group")
     groups_show.add_argument("name", help="Group name")
     groups_show.add_argument("--limit", type=int, default=50, help="Max threads to show")
+    _add_db_arg(groups_show)
 
     # --- serve ---
     serve_p = sub.add_parser("serve", help="Start MCP server")
