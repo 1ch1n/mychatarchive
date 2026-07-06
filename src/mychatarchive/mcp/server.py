@@ -364,9 +364,7 @@ def get_profile(
 
     Use this at the start of a session to understand who the user is and what
     they're currently working on. Returns thread summaries (if available) plus
-    recent conversations and captured thoughts.
-
-    Stolen from Supermemory's "user profile" concept — but built on lossless archive data.
+    recent conversations and captured thoughts, built on lossless archive data.
 
     Args:
         days_back: How many days of history to include (default 30)

@@ -117,9 +117,155 @@ def _ensure_thread_summaries_v2(con: sqlite3.Connection, dim: int) -> None:
     con.commit()
 
 
+SCHEMA_VERSION = "2"
+
+
+def _detect_existing_vec_dim(con: sqlite3.Connection) -> Optional[int]:
+    """Read the embedding dim baked into an existing vec_chunks table, if any.
+
+    vec0 freezes the dimension into its DDL (``embedding float[384]``); parsing
+    it back tells us the archive's real dim regardless of current config.
+    """
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'vec_chunks'"
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    m = re.search(r"float\[(\d+)\]", row[0])
+    return int(m.group(1)) if m else None
+
+
+def _ensure_archive_meta(con: sqlite3.Connection) -> int:
+    """Create the self-describing archive_meta table and return the archive's
+    authoritative embedding dimension.
+
+    archive_meta records schema_version, embedding model/dim, chunk params, and
+    the writing tool version. The dimension recorded here (or, for pre-0.3.0
+    archives, the dim already frozen into vec_chunks) is authoritative: if the
+    currently-configured embedding dim disagrees with an existing archive, we
+    raise rather than create mismatched vec tables — the exact failure mode that
+    silently produced unusable vectors before this table existed.
+    """
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS archive_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    existing = dict(con.execute("SELECT key, value FROM archive_meta").fetchall())
+    config_dim = _get_embedding_dim()
+    frozen_dim = _detect_existing_vec_dim(con)
+
+    # Authoritative dim: what the archive was actually built with wins over config.
+    if existing.get("embedding_dim"):
+        true_dim = int(existing["embedding_dim"])
+    elif frozen_dim is not None:
+        true_dim = frozen_dim
+    else:
+        true_dim = config_dim  # fresh archive — config decides
+
+    # Guard: config points at a different-dimensioned model than this archive.
+    if true_dim != config_dim:
+        from mychatarchive import config as _cfg
+        raise RuntimeError(
+            f"Embedding dimension mismatch: this archive was built with "
+            f"dim={true_dim} but the current config resolves to dim={config_dim} "
+            f"(model={_cfg.get_embedding_model()}). Re-embedding with a different "
+            f"model needs a fresh archive (or a future 'reindex'). Refusing to "
+            f"create mismatched vector tables."
+        )
+
+    if not existing:
+        from mychatarchive import config as _cfg
+        try:
+            from mychatarchive import __version__ as _ver
+        except Exception:
+            _ver = "unknown"
+        meta = {
+            "schema_version": SCHEMA_VERSION,
+            "mychatarchive_version": str(_ver),
+            "embedding_model": _cfg.get_embedding_model(),
+            "embedding_dim": str(true_dim),
+            "chunk_size": str(_cfg.get_chunk_size()),
+            "chunk_overlap": str(_cfg.get_chunk_overlap()),
+        }
+        con.executemany(
+            "INSERT OR IGNORE INTO archive_meta (key, value) VALUES (?, ?)",
+            list(meta.items()),
+        )
+        con.commit()
+
+    return true_dim
+
+
+def _create_messages_fts(con: sqlite3.Connection) -> None:
+    """Create the external-content FTS5 table + sync triggers.
+
+    External content (content='messages') means the FTS index stores only the
+    inverted index and reads original text from messages via rowid — enabling
+    bm25() ranking, snippet()/highlight(), and native deletes, with no separate
+    docid map to keep in sync. Triggers mirror INSERT/UPDATE/DELETE on messages.
+    """
+    con.executescript("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+            USING fts5(text, content='messages', content_rowid='rowid');
+
+        CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, text)
+                VALUES('delete', old.rowid, old.text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, text)
+                VALUES('delete', old.rowid, old.text);
+            INSERT INTO messages_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+    """)
+
+
+def _ensure_messages_fts_v2(con: sqlite3.Connection) -> None:
+    """Create or migrate messages_fts to external-content FTS5.
+
+    Pre-0.3.0 archives used ``fts5(text, content='')`` (contentless) plus a
+    hand-maintained messages_fts_docids map, with no relevance ordering. Detect
+    that by the stored CREATE SQL, drop it and the docid map, recreate as
+    external-content, and rebuild the index from the messages table in place.
+    Fresh archives just get the new table. Idempotent.
+    """
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'messages_fts'"
+    ).fetchone()
+    existing_sql = row[0] if row else None
+    is_external = existing_sql is not None and "content='messages'" in existing_sql
+
+    if existing_sql is not None and not is_external:
+        # Old contentless FTS — drop it, the docid map, and any stale triggers.
+        con.executescript("""
+            DROP TRIGGER IF EXISTS messages_fts_ai;
+            DROP TRIGGER IF EXISTS messages_fts_ad;
+            DROP TRIGGER IF EXISTS messages_fts_au;
+            DROP TABLE IF EXISTS messages_fts;
+            DROP TABLE IF EXISTS messages_fts_docids;
+        """)
+        existing_sql = None
+
+    if existing_sql is None:
+        _create_messages_fts(con)
+        # Populate from existing messages (no-op on a fresh empty table).
+        con.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+    else:
+        # Already external-content — ensure triggers exist (idempotent).
+        _create_messages_fts(con)
+
+    con.commit()
+
+
 def ensure_schema(con: sqlite3.Connection):
-    """Create all tables (ingestion + brain). Idempotent."""
-    dim = _get_embedding_dim()
+    """Create all tables (ingestion + brain). Idempotent.
+
+    The embedding dimension for vec0 tables is resolved from archive_meta
+    (the self-describing record), not directly from config, so an archive
+    always keeps the dimension it was created with.
+    """
     cur = con.cursor()
 
     # thread_summaries is handled separately below (needs migration logic).
@@ -134,14 +280,6 @@ def ensure_schema(con: sqlite3.Connection):
             text TEXT NOT NULL,
             title TEXT,
             source_id TEXT NOT NULL
-        );
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
-            USING fts5(text, content='');
-
-        CREATE TABLE IF NOT EXISTS messages_fts_docids (
-            rowid INTEGER PRIMARY KEY,
-            message_id TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS chunks (
@@ -177,7 +315,23 @@ def ensure_schema(con: sqlite3.Connection):
             added_at TEXT NOT NULL,
             PRIMARY KEY (canonical_thread_id, group_id)
         );
+
+        -- Secondary indexes: the summarizer and thread iteration scan by
+        -- (thread, ts); recent-chunk queries scan chunks by time. Without
+        -- these, summarize is O(threads x messages) on a large archive.
+        CREATE INDEX IF NOT EXISTS idx_messages_thread_ts
+            ON messages(canonical_thread_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_chunks_ts_start
+            ON chunks(ts_start);
     """)
+
+    con.commit()
+
+    # Self-describing metadata + embedding-dim authority. MUST run before any
+    # vec0 table is created: the archive's true dim comes from here, not from
+    # mutable config, so flipping the configured model can never silently build
+    # wrong-dim vector tables (it raises instead).
+    dim = _ensure_archive_meta(con)
 
     cur.execute(f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks
@@ -191,6 +345,10 @@ def ensure_schema(con: sqlite3.Connection):
 
     con.commit()
 
+    # Full-text search: create or migrate to external-content FTS5 (bm25
+    # ranking, native deletes) kept in sync by triggers.
+    _ensure_messages_fts_v2(con)
+
     # Thread summaries: create or migrate to multi-segment schema
     _ensure_thread_summaries_v2(con, dim)
 
@@ -200,22 +358,19 @@ def ensure_schema(con: sqlite3.Connection):
 def insert_message(con: sqlite3.Connection, message_id: str, canonical_thread_id: str,
                    platform: str, account_id: str, ts: str, role: str, text: str,
                    title: str, source_id: str) -> bool:
-    """Insert a message. Returns True if inserted, False if duplicate."""
+    """Insert a message. Returns True if inserted, False if duplicate.
+
+    The external-content FTS index is maintained by the messages_fts_ai/au/ad
+    triggers (see _create_messages_fts), so there is no manual FTS bookkeeping
+    here. INSERT OR IGNORE that skips a duplicate does not fire the trigger.
+    """
     cur = con.execute(
         "INSERT OR IGNORE INTO messages "
         "(message_id, canonical_thread_id, platform, account_id, ts, role, text, title, source_id) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
         (message_id, canonical_thread_id, platform, account_id, ts, role, text, title, source_id),
     )
-    if cur.rowcount == 0:
-        return False
-    con.execute("INSERT INTO messages_fts (text) VALUES (?)", (text,))
-    fts_rowid = con.execute("SELECT max(rowid) FROM messages_fts").fetchone()[0]
-    con.execute(
-        "INSERT INTO messages_fts_docids (rowid, message_id) VALUES (?,?)",
-        (fts_rowid, message_id),
-    )
-    return True
+    return cur.rowcount > 0
 
 
 # --- Counts ---
@@ -404,12 +559,22 @@ def search_thoughts(con: sqlite3.Connection, embedding: list[float], limit: int 
     ).fetchall()
 
 
-def _sanitize_fts_query(query: str) -> str:
-    """Sanitize query for FTS5 to avoid syntax errors (e.g. apostrophes in 'i've')."""
+def _build_fts_match(query: str) -> str:
+    """Turn arbitrary user text into a safe FTS5 MATCH expression.
+
+    Each whitespace-separated token becomes a double-quoted string literal, so
+    hyphens, colons, apostrophes, quotes, and FTS5 operators (AND/OR/NOT/NEAR,
+    parentheses, '*', '^') are matched literally instead of raising a syntax
+    error. Tokens are implicitly ANDed — the FTS5 default. Returns "" for empty
+    input (caller treats that as "no results").
+    """
     if not query or not isinstance(query, str):
-        return query or ""
-    # Remove apostrophes - FTS5 treats them as special and raises syntax errors
-    return re.sub(r"'", "", query.strip())
+        return ""
+    tokens = query.split()
+    if not tokens:
+        return ""
+    # FTS5 string-literal escaping: wrap in double quotes, double any internal ".
+    return " ".join('"' + tok.replace('"', '""') + '"' for tok in tokens)
 
 
 def fts_search(
@@ -421,18 +586,22 @@ def fts_search(
     sort_by_time: bool = False,
     group_thread_ids: set[str] | None = None,
 ):
-    """Full-text search via FTS5."""
-    query = _sanitize_fts_query(query)
-    if not query:
+    """Full-text search via external-content FTS5, ranked by bm25 relevance.
+
+    Results are ordered best-match-first (bm25) unless sort_by_time is set, in
+    which case the caller wants reverse-chronological. The messages row is
+    joined directly on the shared rowid (no docid map).
+    """
+    match = _build_fts_match(query)
+    if not match:
         return []
     sql = """
-        SELECT d.message_id, m.text, m.canonical_thread_id, m.ts, m.role, m.title
+        SELECT m.message_id, m.text, m.canonical_thread_id, m.ts, m.role, m.title
         FROM messages_fts f
-        JOIN messages_fts_docids d ON f.rowid = d.rowid
-        JOIN messages m ON m.message_id = d.message_id
+        JOIN messages m ON m.rowid = f.rowid
         WHERE messages_fts MATCH ?
     """
-    params: list = [query]
+    params: list = [match]
     if platform:
         platforms = [platform] if isinstance(platform, str) else platform
         placeholders = ",".join("?" * len(platforms))
@@ -445,8 +614,8 @@ def fts_search(
         placeholders = ",".join("?" * len(group_thread_ids))
         sql += f" AND m.canonical_thread_id IN ({placeholders})"
         params.extend(group_thread_ids)
-    if sort_by_time:
-        sql += " ORDER BY m.ts DESC"
+    # bm25() returns more-negative for better matches, so ascending = best first.
+    sql += " ORDER BY m.ts DESC" if sort_by_time else " ORDER BY bm25(messages_fts)"
     sql += " LIMIT ?"
     params.append(limit)
     return con.execute(sql, params).fetchall()

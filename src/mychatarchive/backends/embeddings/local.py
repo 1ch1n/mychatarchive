@@ -18,7 +18,17 @@ def _get_default_model() -> str:
 def get_model():
     global _model, _model_name
     if _model is None:
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as e:
+            raise ImportError(
+                "Local embeddings need the optional ML stack (torch + "
+                "sentence-transformers). Install it with:\n"
+                '    pip install "mychatarchive[local]"\n'
+                "or use the OpenAI backend instead: set embeddings.backend to "
+                '"openai" in ~/.mychatarchive/config.json and install '
+                '"mychatarchive[openai]".'
+            ) from e
         _model_name = _get_default_model()
         print(f"Loading model: {_model_name}", file=sys.stderr)
         _model = SentenceTransformer(_model_name)

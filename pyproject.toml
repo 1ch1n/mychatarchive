@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mychatarchive"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first AI memory archive. Import chat history, generate semantic embeddings, and search via MCP."
 readme = "README.md"
 license = {text = "AGPL-3.0"}
@@ -23,9 +23,11 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# Core stays lightweight so `uvx mychatarchive` and `pip install mychatarchive`
+# are fast: import + full-text search + MCP work with no ML stack. Local
+# semantic embeddings (torch + sentence-transformers, ~2GB) move to the
+# [local] extra; hosted embeddings use the [openai] extra.
 dependencies = [
-    "sentence-transformers>=3.0.0",
-    "torch>=2.0.0",
     "sqlite-vec>=0.1.1",
     "mcp[cli]>=1.0.0",
     "tqdm>=4.66.0",
@@ -34,6 +36,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local = [
+    "sentence-transformers>=3.0.0",
+    "torch>=2.0.0",
+]
 openai = [
     "openai>=1.0.0",
 ]
