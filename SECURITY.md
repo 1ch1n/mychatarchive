@@ -4,14 +4,17 @@
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.1.x   | Yes                |
+| 0.3.x   | Yes                |
+| < 0.3   | No — upgrade; archives migrate in place on first open |
 
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability in MyChatArchive, please report it
 responsibly. **Do not open a public issue.**
 
-Email [channing@mychatarchive.com](mailto:channing@mychatarchive.com) with:
+Use GitHub's [private vulnerability reporting](https://github.com/1ch1n/mychatarchive/security/advisories/new)
+on this repository, or email
+[channing@mychatarchive.com](mailto:channing@mychatarchive.com) with:
 
 - A description of the vulnerability
 - Steps to reproduce the issue
@@ -34,6 +37,11 @@ MyChatArchive is a local-first tool. The primary attack surface includes:
   to an external LLM API. Users should be aware of the privacy implications.
 - **SQLite database.** The archive contains your full conversation history. Protect
   the database file with appropriate filesystem permissions.
+- **Imported content is untrusted input.** Conversation text is stored and
+  indexed verbatim but never executed or evaluated. Anything that renders or
+  forwards archive content — including MCP clients and LLMs consuming search
+  results — is a trust boundary: imported text can contain adversarial
+  instructions aimed at whatever reads it.
 
 ## Best Practices
 
