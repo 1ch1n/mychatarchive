@@ -1,8 +1,11 @@
 """Parser registry and auto-detection."""
 
 import json
+import re
 from pathlib import Path
 from typing import Iterator
+
+import ijson
 
 from mychatarchive.parsers import chatgpt, anthropic, grok, claude_code, cursor
 
@@ -53,15 +56,28 @@ def detect_format(file_path: Path) -> str | None:
     stripped = head.lstrip()
 
     if stripped.startswith("["):
+        # Stream just the FIRST array element — detection must not load a
+        # multi-GB export into memory (json.load here used to).
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                data = json.load(f)
-            if not isinstance(data, list) or len(data) == 0:
-                return None
-            first = data[0]
-        except (json.JSONDecodeError, IndexError):
+            with open(file_path, "rb") as f:
+                first = next(ijson.items(f, "item"), None)
+        except Exception:
             return None
+        if first is None:
+            return None
+    elif re.match(r'^\{\s*"conversations"\s*:', stripped):
+        # Grok's official {"conversations": [...]} wrapper can also be huge —
+        # stream the first conversation only.
+        try:
+            with open(file_path, "rb") as f:
+                item = next(ijson.items(f, "conversations.item"), None)
+        except Exception:
+            return None
+        if isinstance(item, dict) and "responses" in item:
+            return "grok"
+        return None
     elif stripped.startswith("{"):
+        # Other single-object shapes are small (one conversation).
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 first = json.load(f)

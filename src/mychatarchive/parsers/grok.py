@@ -14,28 +14,56 @@ Grok exports use this structure:
 """
 
 import json
+import re
 from datetime import datetime
 from typing import Iterator
 
+import ijson
+
+# Official Grok exports open with {"conversations": [ ... — detect that shape
+# from the head so the (potentially huge) array can be streamed with ijson.
+_CONVERSATIONS_HEAD = re.compile(r'^\{\s*"conversations"\s*:')
+
+
+def _dispatch(item: dict) -> Iterator[dict]:
+    if "conversation" in item and "responses" in item:
+        yield from _parse_wrapped_conversation(item)
+    else:
+        yield from _parse_flat_conversation(item)
+
 
 def parse(input_path: str) -> Iterator[dict]:
+    with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+        head = f.read(4096).lstrip()
+
+    if head.startswith("["):
+        # Top-level array — stream one conversation at a time.
+        with open(input_path, "rb") as f:
+            for item in ijson.items(f, "item"):
+                if isinstance(item, dict):
+                    yield from _dispatch(item)
+        return
+
+    if _CONVERSATIONS_HEAD.match(head):
+        # {"conversations": [...]} — the official (large) export shape; stream
+        # the array without materializing the wrapper object.
+        with open(input_path, "rb") as f:
+            for item in ijson.items(f, "conversations.item"):
+                if isinstance(item, dict):
+                    yield from _dispatch(item)
+        return
+
+    # Remaining shapes are single-conversation objects (or a wrapper whose
+    # "conversations" key isn't first) — small enough that a full load is fine.
     with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
         data = json.load(f)
 
     if isinstance(data, dict) and "conversations" in data:
         for item in data["conversations"]:
-            yield from _parse_wrapped_conversation(item)
-    elif isinstance(data, list):
-        for item in data:
-            if "conversation" in item and "responses" in item:
-                yield from _parse_wrapped_conversation(item)
-            else:
-                yield from _parse_flat_conversation(item)
+            if isinstance(item, dict):
+                yield from _dispatch(item)
     elif isinstance(data, dict):
-        if "conversation" in data and "responses" in data:
-            yield from _parse_wrapped_conversation(data)
-        else:
-            yield from _parse_flat_conversation(data)
+        yield from _dispatch(data)
 
 
 def _parse_wrapped_conversation(item: dict) -> Iterator[dict]:

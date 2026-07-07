@@ -1,19 +1,25 @@
 """Parser for Anthropic Claude conversation exports."""
 
-import json
 from datetime import datetime
 from typing import Iterator
 
+import ijson
+
 
 def parse(input_path: str) -> Iterator[dict]:
+    # Anthropic exports are a top-level JSON array of conversations. Stream
+    # one conversation at a time with ijson so a multi-GB export never has to
+    # fit in memory (json.load here was the old whole-file materialization).
     with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
-        data = json.load(f)
+        start = f.read(4096).lstrip()[:1]
 
-    if not isinstance(data, list):
+    if start != "[":
         raise ValueError("Anthropic export should be a JSON array")
 
-    for convo in data:
-        yield from _parse_conversation(convo)
+    with open(input_path, "rb") as f:
+        for convo in ijson.items(f, "item"):
+            if isinstance(convo, dict):
+                yield from _parse_conversation(convo)
 
 
 def _parse_conversation(convo: dict) -> Iterator[dict]:

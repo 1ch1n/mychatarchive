@@ -46,6 +46,61 @@ def round_epoch(ts) -> int | None:
         return None
 
 
+def _flush_thread(
+    con,
+    thread_messages: list[dict],
+    platform: str,
+    account_id: str,
+    source_id: str,
+) -> tuple[int, int]:
+    """Insert one thread's messages. Returns (inserted, duplicates).
+
+    canonical_thread_id derives from the thread's chronologically-first
+    message, and message_ids derive from the canonical id — identical to the
+    pre-streaming implementation, so re-importing an export produced under
+    either version dedups cleanly.
+    """
+    thread_messages.sort(key=lambda m: m["created_at"])
+    first = thread_messages[0]
+    first_snip = (first["content"] or "")[:256]
+
+    canonical_thread_id = sha1("|".join([
+        platform,
+        account_id,
+        norm_text(first["thread_title"]),
+        str(round_epoch(first["created_at"]) or ""),
+        first["role"] or "",
+        norm_text(first_snip),
+    ]))
+
+    inserted = 0
+    duplicates = 0
+    for msg in thread_messages:
+        ts_round = round_epoch(msg["created_at"]) or 0
+        message_id = sha1("|".join([
+            platform, account_id, canonical_thread_id, msg["role"] or "",
+            str(ts_round), norm_text(msg["content"] or ""),
+        ]))
+
+        ts_iso = iso_from_epoch(msg["created_at"])
+        if not ts_iso:
+            continue
+
+        was_inserted = db.insert_message(
+            con, message_id, canonical_thread_id, platform, account_id,
+            ts_iso, msg["role"] or "", msg["content"] or "",
+            msg["thread_title"], source_id,
+        )
+
+        if was_inserted:
+            inserted += 1
+        else:
+            duplicates += 1
+
+    con.commit()
+    return inserted, duplicates
+
+
 def run(
     file_path: Path,
     db_path: Path,
@@ -54,7 +109,18 @@ def run(
     account_id: str = "main",
     source_id: str | None = None,
 ):
-    """Ingest an export file into the archive database."""
+    """Ingest an export file into the archive database.
+
+    Streams: every parser yields a conversation's messages contiguously, so
+    messages are buffered only until the thread_id changes, then flushed.
+    Peak memory is one thread, not the whole export (which the old
+    ``list(parse(...))`` + group-by-dict approach held in memory twice).
+
+    A repeated thread_id appearing non-contiguously (the same conversation
+    exported twice) flushes twice but derives the same canonical_thread_id
+    from the same first message, so INSERT OR IGNORE dedups it — same net
+    result as the old grouping.
+    """
     is_auto = str(file_path) == "auto"
 
     if format_name is None:
@@ -73,66 +139,46 @@ def run(
     db.ensure_schema(con)
 
     print(f"Parsing {format_name} export: {file_path}", file=sys.stderr)
-    messages = list(parse(file_path, format_name))
-
-    if not messages:
-        print("No messages found in export.", file=sys.stderr)
-        con.close()
-        return 0, 0
-
-    thread_ids = set(m["thread_id"] for m in messages)
-    print(f"Found {len(messages)} messages in {len(thread_ids)} threads.", file=sys.stderr)
-
-    # Group by thread
-    threads: dict[str, list[dict]] = {}
-    for msg in messages:
-        threads.setdefault(msg["thread_id"], []).append(msg)
 
     inserted = 0
     duplicates = 0
+    threads_flushed = 0
+    current_tid: str | None = None
+    current: list[dict] = []
 
-    for _tid, thread_messages in tqdm(threads.items(), desc="Importing", file=sys.stderr):
-        thread_messages.sort(key=lambda m: m["created_at"])
-        first = thread_messages[0]
-        first_snip = (first["content"] or "")[:256]
+    progress = tqdm(desc="Importing", unit=" thread", file=sys.stderr)
+    try:
+        for msg in parse(file_path, format_name):
+            tid = msg["thread_id"]
+            if current and tid != current_tid:
+                ins, dup = _flush_thread(con, current, platform, account_id, source_id)
+                inserted += ins
+                duplicates += dup
+                threads_flushed += 1
+                progress.update(1)
+                current = []
+            current_tid = tid
+            current.append(msg)
 
-        canonical_thread_id = sha1("|".join([
-            platform,
-            account_id,
-            norm_text(first["thread_title"]),
-            str(round_epoch(first["created_at"]) or ""),
-            first["role"] or "",
-            norm_text(first_snip),
-        ]))
+        if current:
+            ins, dup = _flush_thread(con, current, platform, account_id, source_id)
+            inserted += ins
+            duplicates += dup
+            threads_flushed += 1
+            progress.update(1)
+    finally:
+        progress.close()
 
-        for msg in thread_messages:
-            ts_round = round_epoch(msg["created_at"]) or 0
-            message_id = sha1("|".join([
-                platform, account_id, canonical_thread_id, msg["role"] or "",
-                str(ts_round), norm_text(msg["content"] or ""),
-            ]))
-
-            ts_iso = iso_from_epoch(msg["created_at"])
-            if not ts_iso:
-                continue
-
-            was_inserted = db.insert_message(
-                con, message_id, canonical_thread_id, platform, account_id,
-                ts_iso, msg["role"] or "", msg["content"] or "",
-                msg["thread_title"], source_id,
-            )
-
-            if was_inserted:
-                inserted += 1
-            else:
-                duplicates += 1
-
-        con.commit()
+    if threads_flushed == 0:
+        print("No messages found in export.", file=sys.stderr)
+        con.close()
+        return 0, 0
 
     total = db.message_count(con)
     con.close()
 
     print(f"\nDone.", file=sys.stderr)
+    print(f"  Threads:    {threads_flushed}", file=sys.stderr)
     print(f"  Inserted:   {inserted}", file=sys.stderr)
     print(f"  Duplicates: {duplicates}", file=sys.stderr)
     print(f"  Total in DB: {total}", file=sys.stderr)
