@@ -8,12 +8,13 @@ Strategy (hierarchical, no external deps):
      so that sentence-boundary context is preserved for search.
 
 Character heuristic:  ~4 chars/token for English prose.
-Default chunk_size = 1200 chars ≈ 300 tokens.
-  - Fits within sentence-transformers/all-MiniLM-L6-v2 (256-token window) with
-    minimal internal truncation, while capturing far more content than the old
-    fixed 2 000-char hard truncation.
-  - Well under OpenAI text-embedding-3-* 8 192-token limit.
-Default overlap = 150 chars ≈ 37 tokens — enough to keep boundary context.
+Configured default (config.py) = 900 chars ≈ 225 tokens — safely inside
+sentence-transformers/all-MiniLM-L6-v2's 256-token window (the earlier 1200
+≈ 300 tokens silently overflowed it and the tokenizer truncated chunk tails),
+and far under OpenAI text-embedding-3-*'s 8 192-token limit.
+Configured overlap = 100 chars ≈ 25 tokens — keeps boundary context.
+(The function-signature defaults below remain 1200/150 for compatibility;
+runtime callers pass the config values.)
 """
 
 import re
